@@ -35,11 +35,6 @@ class StageArchive {
         this.archiveRoot = archiveRoot
     }
 
-    /**
-     * Find and read an existing valid archive.
-     *
-     * @return parsed stage.json as Map, or null if not found
-     */
     Map findArchive(String stageName, String digest) {
         final stageJson = archivePath(stageName, digest).resolve('stage.json')
         try {
@@ -57,9 +52,6 @@ class StageArchive {
         return null
     }
 
-    /**
-     * Restore a ChannelOut from parsed archive data.
-     */
     ChannelOut restore(Session session, Map data) {
         final stageName = data.get('stage') as String
         final digest = data.get('compatibility_digest') as String
@@ -84,36 +76,32 @@ class StageArchive {
         return new ChannelOut(channels)
     }
 
-    /**
-     * Archive stage output by subscribing to its channels.
-     */
     void archive(Session session, String stageName, String digest, ChannelOut output) {
         final names = output.getNames()
         if( !names ) return
 
-        final collected = new LinkedHashMap<String, List<Map>>()
+        final collected = new LinkedHashMap<String, List<Object>>()
         final pending = new AtomicInteger(names.size())
 
         for( final name : names ) {
-            collected.put(name, Collections.synchronizedList(new ArrayList<Map>()))
+            collected.put(name, Collections.synchronizedList(new ArrayList<Object>()))
             final readCh = CH.getReadChannel(output.getProperty(name))
 
             final events = new HashMap<String, Closure>(2)
             events.put('onNext', { Object value ->
-                collected.get(name).add(analyzeValue(value))
+                collected.get(name).add(value)
             } as Closure)
             events.put('onComplete', {
-                if( pending.decrementAndGet() == 0 )
-                    writeArchive(stageName, digest, collected)
+                if( pending.decrementAndGet() == 0 ) {
+                    final taskHashes = StageTaskCollector.stageTasks.remove(stageName) ?: []
+                    writeArchive(stageName, digest, collected, taskHashes)
+                }
             } as Closure)
 
             DataflowHelper.subscribeImpl(readCh, events)
         }
     }
 
-    /**
-     * Patch stage.json with task hashes after all tasks have completed.
-     */
     void patchTaskHashes(String stageName, String digest, List<String> taskHashes) {
         final stageJson = archivePath(stageName, digest).resolve('stage.json')
         if( !Files.exists(stageJson) ) return
@@ -125,47 +113,31 @@ class StageArchive {
         log.debug "Patched task_hashes for stage ${stageName}: ${taskHashes.size()} tasks"
     }
 
-    // -- private --
-
     Path archivePath(String stageName, String digest) {
         final raw = digest.startsWith('sha256:') ? digest.substring(7) : digest
         final prefix = raw.length() > 16 ? raw.substring(0, 16) : raw
         return archiveRoot.resolve(stageName).resolve(prefix)
     }
 
-    private void writeArchive(String stageName, String digest, Map<String, List<Map>> collected) {
+    // -- private --
+
+    private void writeArchive(String stageName, String digest, Map<String, List<Object>> collected, List<String> taskHashes) {
         final path = archivePath(stageName, digest)
         if( Files.exists(path.resolve('stage.json')) ) return
 
         Files.createDirectories(path)
 
         final channelsJson = new LinkedHashMap<String, Map>()
-        for( final entry : collected.entrySet() ) {
+        for( final chEntry : collected.entrySet() ) {
             final itemsJson = new ArrayList<Map>()
             int idx = 0
-            for( final item : entry.value ) {
-                final meta = item.get('meta')
-                final files = item.get('files') as List<Path>
-                final itemJson = new LinkedHashMap()
-
-                if( meta != null )
-                    itemJson.put('meta', meta)
-                if( files ) {
-                    final itemDir = path.resolve(String.valueOf(idx))
-                    Files.createDirectories(itemDir)
-                    final filesJson = files.collect { Path file ->
-                        final fileName = file.fileName.toString()
-                        final target = itemDir.resolve(fileName)
-                        final checksum = copyWithChecksum(file, target)
-                        [name: fileName, checksum: checksum, size: Files.size(target)]
-                    }
-                    itemJson.put('files', filesJson)
-                }
-                itemJson.put('index', idx)
-                itemsJson.add(itemJson)
+            for( final value : chEntry.value ) {
+                final itemDir = path.resolve(String.valueOf(idx))
+                final elements = serializeValue(value, itemDir)
+                itemsJson.add([index: idx, elements: elements])
                 idx++
             }
-            channelsJson.put(entry.key, [items: itemsJson])
+            channelsJson.put(chEntry.key, [items: itemsJson])
         }
 
         final stageData = [
@@ -174,6 +146,7 @@ class StageArchive {
             compatibility_digest: digest,
             created_at: OffsetDateTime.now().toString(),
             integrity: [status: 'ok'],
+            task_hashes: taskHashes,
             channels: channelsJson
         ]
 
@@ -182,45 +155,57 @@ class StageArchive {
         log.info "Stage ${stageName} archived to ${path}"
     }
 
-    private static Object rebuildValue(Path basePath, Map item) {
-        final meta = item.get('meta')
-        final filesData = item.get('files') as List<Map>
-        final idx = item.get('index') as Integer
-        final itemDir = idx != null ? basePath.resolve(String.valueOf(idx)) : basePath
+    /**
+     * Serialize a channel value into a list of typed elements.
+     * Each element records its type and position so the original
+     * value structure can be faithfully reconstructed.
+     */
+    private static List<Map> serializeValue(Object value, Path itemDir) {
+        if( value instanceof List ) {
+            boolean hasFile = ((List) value).any { it instanceof Path }
+            if( hasFile ) {
+                Files.createDirectories(itemDir)
+            }
+            return ((List) value).collect { el -> serializeElement(el, itemDir) }
+        }
+        // single value (not a tuple)
+        if( value instanceof Path ) {
+            Files.createDirectories(itemDir)
+        }
+        return [serializeElement(value, itemDir)]
+    }
 
-        if( filesData && meta != null ) {
-            final result = new ArrayList()
-            result.add(meta)
-            for( final f : filesData )
-                result.add(itemDir.resolve(f.get('name') as String))
-            return result
+    private static Map serializeElement(Object el, Path itemDir) {
+        if( el instanceof Path ) {
+            final file = (Path) el
+            final fileName = file.fileName.toString()
+            final target = itemDir.resolve(fileName)
+            final checksum = copyWithChecksum(file, target)
+            return [type: 'file', name: fileName, checksum: checksum, size: Files.size(target)]
         }
-        if( filesData ) {
-            if( filesData.size() == 1 )
-                return itemDir.resolve(filesData[0].get('name') as String)
-            return filesData.collect { itemDir.resolve(it.get('name') as String) }
-        }
-        return meta
+        return [type: 'value', data: el]
     }
 
     /**
-     * Separate a channel value into meta (first non-Path) and files (Path elements).
+     * Rebuild a channel value from archived elements,
+     * faithfully reproducing the original structure.
      */
-    static Map analyzeValue(Object value) {
-        if( value instanceof List ) {
-            final files = new ArrayList<Path>()
-            Object meta = null
-            for( final el : (List) value ) {
-                if( el instanceof Path )
-                    files.add((Path) el)
-                else if( meta == null )
-                    meta = el
-            }
-            return [meta: meta, files: files]
+    private static Object rebuildValue(Path basePath, Map item) {
+        final idx = item.get('index') as Integer
+        final itemDir = idx != null ? basePath.resolve(String.valueOf(idx)) : basePath
+        final elements = item.get('elements') as List<Map>
+
+        if( elements.size() == 1 ) {
+            return rebuildElement(elements[0], itemDir)
         }
-        if( value instanceof Path )
-            return [meta: null, files: [value]]
-        return [meta: value, files: null]
+        // multiple elements = tuple
+        return elements.collect { rebuildElement(it, itemDir) }
+    }
+
+    private static Object rebuildElement(Map el, Path itemDir) {
+        if( el.get('type') == 'file' )
+            return itemDir.resolve(el.get('name') as String)
+        return el.get('data')
     }
 
     static String copyWithChecksum(Path source, Path target) {
