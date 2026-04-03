@@ -61,13 +61,16 @@ class StageArchive {
 
         for( final entry : channelsData.entrySet() ) {
             final name = entry.key
-            final items = entry.value.get('items') as List<Map>
+            final items = entry.value.get('items') as List<List>
             final ch = CH.create()
             channels.put(name, ch)
 
             session.addIgniter {
-                for( final item : items ) {
-                    ch.bind(rebuildValue(basePath, item))
+                int idx = 0
+                for( final elements : items ) {
+                    final itemDir = basePath.resolve(String.valueOf(idx))
+                    ch.bind(rebuildValue(elements as List<Map>, itemDir))
+                    idx++
                 }
                 ch.bind(Channel.STOP)
             }
@@ -129,12 +132,11 @@ class StageArchive {
 
         final channelsJson = new LinkedHashMap<String, Map>()
         for( final chEntry : collected.entrySet() ) {
-            final itemsJson = new ArrayList<Map>()
+            final itemsJson = new ArrayList<List>()
             int idx = 0
             for( final value : chEntry.value ) {
                 final itemDir = path.resolve(String.valueOf(idx))
-                final elements = serializeValue(value, itemDir)
-                itemsJson.add([index: idx, elements: elements])
+                itemsJson.add(serializeValue(value, itemDir))
                 idx++
             }
             channelsJson.put(chEntry.key, [items: itemsJson])
@@ -190,15 +192,10 @@ class StageArchive {
      * Rebuild a channel value from archived elements,
      * faithfully reproducing the original structure.
      */
-    private static Object rebuildValue(Path basePath, Map item) {
-        final idx = item.get('index') as Integer
-        final itemDir = idx != null ? basePath.resolve(String.valueOf(idx)) : basePath
-        final elements = item.get('elements') as List<Map>
-
+    private static Object rebuildValue(List<Map> elements, Path itemDir) {
         if( elements.size() == 1 ) {
             return rebuildElement(elements[0], itemDir)
         }
-        // multiple elements = tuple
         return elements.collect { rebuildElement(it, itemDir) }
     }
 
