@@ -1,14 +1,14 @@
 package nextflow.plugin
 
 import java.nio.file.Files
+import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.security.DigestInputStream
+import java.security.MessageDigest
 import java.time.OffsetDateTime
 import java.util.concurrent.atomic.AtomicInteger
 
-import com.google.common.hash.Funnels
-import com.google.common.hash.Hashing
-import com.google.common.io.ByteStreams
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import groovy.transform.CompileStatic
@@ -19,7 +19,6 @@ import nextflow.Session
 import nextflow.extension.CH
 import nextflow.extension.DataflowHelper
 import nextflow.script.ChannelOut
-import nextflow.script.WorkflowDef
 
 /**
  * Handles stage archive read/write operations and stage.json management.
@@ -28,6 +27,8 @@ import nextflow.script.WorkflowDef
 @CompileStatic
 class StageArchive {
 
+    private static final JsonSlurper JSON_SLURPER = new JsonSlurper()
+
     private final Path archiveRoot
 
     StageArchive(Path archiveRoot) {
@@ -35,57 +36,46 @@ class StageArchive {
     }
 
     /**
-     * Compute the archive directory path for a stage + digest.
-     */
-    Path archivePath(String stageName, String digest) {
-        final prefix = digestPrefix(digest)
-        return archiveRoot.resolve(stageName).resolve(prefix)
-    }
-
-    /**
-     * Find an existing valid archive for the given stage and digest.
+     * Find and read an existing valid archive.
      *
-     * @return the archive directory path, or null if not found
+     * @return parsed stage.json as Map, or null if not found
      */
-    Path findArchive(String stageName, String digest) {
-        final path = archivePath(stageName, digest)
-        final stageJson = path.resolve('stage.json')
-        if( !Files.exists(stageJson) )
-            return null
-
+    Map findArchive(String stageName, String digest) {
+        final stageJson = archivePath(stageName, digest).resolve('stage.json')
         try {
-            final data = new JsonSlurper().parse(stageJson.toFile()) as Map
+            final data = JSON_SLURPER.parse(stageJson.toFile()) as Map
             final integrity = data.get('integrity') as Map
             if( integrity?.get('status') == 'ok' )
-                return path
+                return data
+        }
+        catch( NoSuchFileException | FileNotFoundException ignored ) {
+            return null
         }
         catch( Exception e ) {
-            log.warn "Failed to read stage.json at ${stageJson}: ${e.message}"
+            log.debug "Failed to read stage.json at ${stageJson}: ${e.message}"
         }
         return null
     }
 
     /**
-     * Restore a ChannelOut from an archived stage.
+     * Restore a ChannelOut from parsed archive data.
      */
-    ChannelOut restore(Session session, Path archivePath, WorkflowDef workflow) {
-        final stageJson = archivePath.resolve('stage.json')
-        final data = new JsonSlurper().parse(stageJson.toFile()) as Map
+    ChannelOut restore(Session session, Map data) {
+        final stageName = data.get('stage') as String
+        final digest = data.get('compatibility_digest') as String
+        final basePath = archivePath(stageName, digest)
         final channelsData = data.get('channels') as Map<String, Map>
         final channels = new LinkedHashMap<String, DataflowWriteChannel>()
 
         for( final entry : channelsData.entrySet() ) {
             final name = entry.key
-            final channelData = entry.value
-            final items = channelData.get('items') as List<Map>
+            final items = entry.value.get('items') as List<Map>
             final ch = CH.create()
             channels.put(name, ch)
 
-            // emit values after DAG setup
             session.addIgniter {
                 for( final item : items ) {
-                    final value = rebuildValue(archivePath, item)
-                    ch.bind(value)
+                    ch.bind(rebuildValue(basePath, item))
                 }
                 ch.bind(Channel.STOP)
             }
@@ -95,16 +85,13 @@ class StageArchive {
     }
 
     /**
-     * Archive the output of a completed stage by subscribing to its channels.
+     * Archive stage output by subscribing to its channels.
      */
-    void archive(Session session, String stageName, String digest, ChannelOut output, Closure onComplete) {
+    void archive(Session session, String stageName, String digest, ChannelOut output) {
         final names = output.getNames()
-        if( !names ) {
-            log.debug "Stage ${stageName} has no named outputs, skipping archive"
-            return
-        }
+        if( !names ) return
 
-        final collected = Collections.synchronizedMap(new LinkedHashMap<String, List<Map>>())
+        final collected = new LinkedHashMap<String, List<Map>>()
         final pending = new AtomicInteger(names.size())
 
         for( final name : names ) {
@@ -113,72 +100,74 @@ class StageArchive {
 
             final events = new HashMap<String, Closure>(2)
             events.put('onNext', { Object value ->
-                final analyzed = analyzeValue(value)
-                collected.get(name).add(analyzed)
+                collected.get(name).add(analyzeValue(value))
             } as Closure)
             events.put('onComplete', {
-                if( pending.decrementAndGet() == 0 ) {
+                if( pending.decrementAndGet() == 0 )
                     writeArchive(stageName, digest, collected)
-                    if( onComplete != null )
-                        onComplete.call()
-                }
             } as Closure)
 
             DataflowHelper.subscribeImpl(readCh, events)
         }
     }
 
-    // -- private helpers --
-
     /**
-     * Write the archive directory: copy files + write stage.json.
+     * Patch stage.json with task hashes after all tasks have completed.
      */
+    void patchTaskHashes(String stageName, String digest, List<String> taskHashes) {
+        final stageJson = archivePath(stageName, digest).resolve('stage.json')
+        if( !Files.exists(stageJson) ) return
+
+        final data = JSON_SLURPER.parse(stageJson.toFile()) as Map
+        data.put('task_hashes', taskHashes)
+        final json = JsonOutput.prettyPrint(JsonOutput.toJson(data))
+        Files.write(stageJson, json.getBytes('UTF-8'))
+        log.debug "Patched task_hashes for stage ${stageName}: ${taskHashes.size()} tasks"
+    }
+
+    // -- private --
+
+    Path archivePath(String stageName, String digest) {
+        final raw = digest.startsWith('sha256:') ? digest.substring(7) : digest
+        final prefix = raw.length() > 16 ? raw.substring(0, 16) : raw
+        return archiveRoot.resolve(stageName).resolve(prefix)
+    }
+
     private void writeArchive(String stageName, String digest, Map<String, List<Map>> collected) {
         final path = archivePath(stageName, digest)
-
-        // skip if already archived (immutable)
-        if( Files.exists(path.resolve('stage.json')) ) {
-            log.debug "Archive already exists at ${path}, skipping"
-            return
-        }
+        if( Files.exists(path.resolve('stage.json')) ) return
 
         Files.createDirectories(path)
 
-        // process each channel's items: copy files, compute checksums
         final channelsJson = new LinkedHashMap<String, Map>()
         for( final entry : collected.entrySet() ) {
-            final name = entry.key
-            final items = entry.value
             final itemsJson = new ArrayList<Map>()
-
-            for( final item : items ) {
+            int idx = 0
+            for( final item : entry.value ) {
                 final meta = item.get('meta')
                 final files = item.get('files') as List<Path>
-                final filesJson = new ArrayList<Map>()
-
-                if( files ) {
-                    for( final file : files ) {
-                        final fileName = file.fileName.toString()
-                        final target = path.resolve(fileName)
-                        Files.copy(file, target, StandardCopyOption.REPLACE_EXISTING)
-                        final checksum = computeChecksum(target)
-                        final size = Files.size(target)
-                        filesJson.add([name: fileName, checksum: checksum, size: size])
-                    }
-                }
-
                 final itemJson = new LinkedHashMap()
+
                 if( meta != null )
                     itemJson.put('meta', meta)
-                if( filesJson )
+                if( files ) {
+                    final itemDir = path.resolve(String.valueOf(idx))
+                    Files.createDirectories(itemDir)
+                    final filesJson = files.collect { Path file ->
+                        final fileName = file.fileName.toString()
+                        final target = itemDir.resolve(fileName)
+                        final checksum = copyWithChecksum(file, target)
+                        [name: fileName, checksum: checksum, size: Files.size(target)]
+                    }
                     itemJson.put('files', filesJson)
+                }
+                itemJson.put('index', idx)
                 itemsJson.add(itemJson)
+                idx++
             }
-
-            channelsJson.put(name, [items: itemsJson])
+            channelsJson.put(entry.key, [items: itemsJson])
         }
 
-        // write stage.json
         final stageData = [
             schema_version: 'v1',
             stage: stageName,
@@ -193,36 +182,29 @@ class StageArchive {
         log.info "Stage ${stageName} archived to ${path}"
     }
 
-    /**
-     * Rebuild a channel value from archived JSON item.
-     */
-    private Object rebuildValue(Path archivePath, Map item) {
+    private static Object rebuildValue(Path basePath, Map item) {
         final meta = item.get('meta')
         final filesData = item.get('files') as List<Map>
+        final idx = item.get('index') as Integer
+        final itemDir = idx != null ? basePath.resolve(String.valueOf(idx)) : basePath
 
         if( filesData && meta != null ) {
-            // tuple: [meta, file1, file2, ...]
             final result = new ArrayList()
             result.add(meta)
-            for( final f : filesData ) {
-                result.add(archivePath.resolve(f.get('name') as String))
-            }
+            for( final f : filesData )
+                result.add(itemDir.resolve(f.get('name') as String))
             return result
         }
-        else if( filesData ) {
-            // single file or list of files
+        if( filesData ) {
             if( filesData.size() == 1 )
-                return archivePath.resolve(filesData[0].get('name') as String)
-            return filesData.collect { archivePath.resolve(it.get('name') as String) }
+                return itemDir.resolve(filesData[0].get('name') as String)
+            return filesData.collect { itemDir.resolve(it.get('name') as String) }
         }
-        else if( meta != null ) {
-            return meta
-        }
-        return null
+        return meta
     }
 
     /**
-     * Analyze a channel value into meta (non-Path) and files (Path) components.
+     * Separate a channel value into meta (first non-Path) and files (Path elements).
      */
     static Map analyzeValue(Object value) {
         if( value instanceof List ) {
@@ -241,26 +223,11 @@ class StageArchive {
         return [meta: value, files: null]
     }
 
-    /**
-     * Compute SHA-256 checksum for a file.
-     */
-    static String computeChecksum(Path file) {
-        final hasher = Hashing.sha256().newHasher()
-        final input = Files.newInputStream(file)
-        try {
-            ByteStreams.copy(input, Funnels.asOutputStream(hasher))
+    static String copyWithChecksum(Path source, Path target) {
+        final digest = MessageDigest.getInstance('SHA-256')
+        source.withInputStream { raw ->
+            Files.copy(new DigestInputStream(raw, digest), target, StandardCopyOption.REPLACE_EXISTING)
         }
-        finally {
-            input.close()
-        }
-        return "sha256:${hasher.hash().toString()}"
-    }
-
-    /**
-     * Extract the first 16 chars from a digest string for directory naming.
-     */
-    static String digestPrefix(String digest) {
-        final raw = digest.startsWith('sha256:') ? digest.substring(7) : digest
-        return raw.length() > 16 ? raw.substring(0, 16) : raw
+        return "sha256:${digest.digest().encodeHex().toString()}"
     }
 }

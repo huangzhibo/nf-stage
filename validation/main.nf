@@ -1,22 +1,61 @@
-workflow PREPARE {
-    take: input
-    main:
-        result = input.map { it.toUpperCase() }
-    emit:
-        result
+process FASTP {
+    input:
+    tuple val(meta), path(fastq)
+
+    output:
+    tuple val(meta), path("${meta.id}.trimmed.fq")
+
+    script:
+    """
+    echo "trimmed: \$(cat ${fastq})" > ${meta.id}.trimmed.fq
+    """
 }
 
-workflow PROCESS_DATA {
-    take: data
+process BWA_MEM {
+    input:
+    tuple val(meta), path(fastq)
+    val(reference)
+
+    output:
+    tuple val(meta), path("${meta.id}.bam"), path("${meta.id}.bam.bai")
+
+    script:
+    """
+    echo "aligned \$(cat ${fastq}) to ${reference}" > ${meta.id}.bam
+    echo "index" > ${meta.id}.bam.bai
+    """
+}
+
+workflow PREPARE {
+    take:
+    input
+
     main:
-        result = data.map { "processed: ${it}" }
+    FASTP(input)
+
     emit:
-        result
+    fastq = FASTP.out
+}
+
+workflow ALIGN {
+    take:
+    fastq
+    reference
+
+    main:
+    BWA_MEM(fastq, reference)
+
+    emit:
+    bam = BWA_MEM.out
 }
 
 workflow {
-    ch = Channel.of('sample1', 'sample2', 'sample3')
+    ch = Channel.of(
+        [[id: 'sample1'], file('data/sample1.fq')],
+        [[id: 'sample2'], file('data/sample2.fq')]
+    )
+
     prepared = PREPARE(ch)
-    processed = PROCESS_DATA(prepared.result)
-    processed.result.view()
+    aligned  = ALIGN(prepared.fastq, params.reference)
+    aligned.bam.view { meta, bam, bai -> "${meta.id}: ${bam}" }
 }

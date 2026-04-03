@@ -10,8 +10,9 @@ nextflowPlugin {
     provider = 'nextflow'
     className = 'nextflow.plugin.StagePlugin'
     extensionPoints = [
-        'nextflow.plugin.StageExtension',
-        'nextflow.plugin.StageFactory'
+        'nextflow.plugin.StageConfig',
+        'nextflow.plugin.StageFactory',
+        'nextflow.plugin.StageObserver'
     ]
 }
 

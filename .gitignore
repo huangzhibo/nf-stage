@@ -7,3 +7,4 @@
 build
 work
 .nf-stage-archive
+cached-stages.tsv
