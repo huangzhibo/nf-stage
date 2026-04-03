@@ -27,8 +27,6 @@ import nextflow.script.ChannelOut
 @CompileStatic
 class StageArchive {
 
-    private static final JsonSlurper JSON_SLURPER = new JsonSlurper()
-
     private final Path archiveRoot
 
     StageArchive(Path archiveRoot) {
@@ -38,7 +36,7 @@ class StageArchive {
     Map findArchive(String stageName, String digest) {
         final stageJson = archivePath(stageName, digest).resolve('stage.json')
         try {
-            final data = JSON_SLURPER.parse(stageJson.toFile()) as Map
+            final data = new JsonSlurper().parse(stageJson.toFile()) as Map
             final integrity = data.get('integrity') as Map
             if( integrity?.get('status') == 'ok' )
                 return data
@@ -68,14 +66,19 @@ class StageArchive {
             channels.put(name, ch)
 
             session.addIgniter {
-                int idx = 0
-                for( final elements : items ) {
-                    final itemDir = basePath.resolve(String.valueOf(idx))
-                    ch.bind(rebuildValue(elements as List<Map>, itemDir))
-                    idx++
+                if( isValue && items.size() == 1 ) {
+                    final itemDir = basePath.resolve('0')
+                    ch.bind(rebuildValue(items[0] as List<Map>, itemDir))
                 }
-                if( !isValue )
+                else {
+                    int idx = 0
+                    for( final elements : items ) {
+                        final itemDir = basePath.resolve(String.valueOf(idx))
+                        ch.bind(rebuildValue(elements as List<Map>, itemDir))
+                        idx++
+                    }
                     ch.bind(Channel.STOP)
+                }
             }
         }
 
@@ -101,10 +104,8 @@ class StageArchive {
                 collected.get(name).add(value)
             } as Closure)
             events.put('onComplete', {
-                if( pending.decrementAndGet() == 0 ) {
-                    final taskHashes = StageTaskCollector.stageTasks.remove(stageName) ?: []
-                    writeArchive(stageName, digest, collected, channelTypes, taskHashes)
-                }
+                if( pending.decrementAndGet() == 0 )
+                    writeArchive(stageName, digest, collected, channelTypes)
             } as Closure)
 
             DataflowHelper.subscribeImpl(readCh, events)
@@ -115,7 +116,7 @@ class StageArchive {
         final stageJson = archivePath(stageName, digest).resolve('stage.json')
         if( !Files.exists(stageJson) ) return
 
-        final data = JSON_SLURPER.parse(stageJson.toFile()) as Map
+        final data = new JsonSlurper().parse(stageJson.toFile()) as Map
         data.put('task_hashes', taskHashes)
         final json = JsonOutput.prettyPrint(JsonOutput.toJson(data))
         Files.write(stageJson, json.getBytes('UTF-8'))
@@ -130,7 +131,7 @@ class StageArchive {
 
     // -- private --
 
-    private void writeArchive(String stageName, String digest, Map<String, List<Object>> collected, Map<String, String> channelTypes, List<String> taskHashes) {
+    private void writeArchive(String stageName, String digest, Map<String, List<Object>> collected, Map<String, String> channelTypes) {
         final path = archivePath(stageName, digest)
         if( Files.exists(path.resolve('stage.json')) ) return
 
@@ -155,7 +156,6 @@ class StageArchive {
             compatibility_digest: digest,
             created_at: OffsetDateTime.now().toString(),
             integrity: [status: 'ok'],
-            task_hashes: taskHashes,
             channels: channelsJson
         ]
 
@@ -164,23 +164,15 @@ class StageArchive {
         log.info "Stage ${stageName} archived to ${path}"
     }
 
-    /**
-     * Serialize a channel value into a list of typed elements.
-     * Each element records its type and position so the original
-     * value structure can be faithfully reconstructed.
-     */
     private static List<Map> serializeValue(Object value, Path itemDir) {
         if( value instanceof List ) {
             boolean hasFile = ((List) value).any { it instanceof Path }
-            if( hasFile ) {
+            if( hasFile )
                 Files.createDirectories(itemDir)
-            }
             return ((List) value).collect { el -> serializeElement(el, itemDir) }
         }
-        // single value (not a tuple)
-        if( value instanceof Path ) {
+        if( value instanceof Path )
             Files.createDirectories(itemDir)
-        }
         return [serializeElement(value, itemDir)]
     }
 
@@ -195,14 +187,9 @@ class StageArchive {
         return [type: 'value', data: el]
     }
 
-    /**
-     * Rebuild a channel value from archived elements,
-     * faithfully reproducing the original structure.
-     */
     private static Object rebuildValue(List<Map> elements, Path itemDir) {
-        if( elements.size() == 1 ) {
+        if( elements.size() == 1 )
             return rebuildElement(elements[0], itemDir)
-        }
         return elements.collect { rebuildElement(it, itemDir) }
     }
 
