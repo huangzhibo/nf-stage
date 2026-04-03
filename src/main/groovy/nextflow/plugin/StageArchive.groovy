@@ -61,8 +61,10 @@ class StageArchive {
 
         for( final entry : channelsData.entrySet() ) {
             final name = entry.key
-            final items = entry.value.get('items') as List<List>
-            final ch = CH.create()
+            final chData = entry.value
+            final items = chData.get('items') as List<List>
+            final isValue = chData.get('type') == 'value'
+            final ch = CH.create(isValue)
             channels.put(name, ch)
 
             session.addIgniter {
@@ -72,7 +74,8 @@ class StageArchive {
                     ch.bind(rebuildValue(elements as List<Map>, itemDir))
                     idx++
                 }
-                ch.bind(Channel.STOP)
+                if( !isValue )
+                    ch.bind(Channel.STOP)
             }
         }
 
@@ -84,11 +87,14 @@ class StageArchive {
         if( !names ) return
 
         final collected = new LinkedHashMap<String, List<Object>>()
+        final channelTypes = new LinkedHashMap<String, String>()
         final pending = new AtomicInteger(names.size())
 
         for( final name : names ) {
             collected.put(name, Collections.synchronizedList(new ArrayList<Object>()))
-            final readCh = CH.getReadChannel(output.getProperty(name))
+            final ch = output.getProperty(name)
+            channelTypes.put(name, CH.isValue(ch) ? 'value' : 'queue')
+            final readCh = CH.getReadChannel(ch)
 
             final events = new HashMap<String, Closure>(2)
             events.put('onNext', { Object value ->
@@ -97,7 +103,7 @@ class StageArchive {
             events.put('onComplete', {
                 if( pending.decrementAndGet() == 0 ) {
                     final taskHashes = StageTaskCollector.stageTasks.remove(stageName) ?: []
-                    writeArchive(stageName, digest, collected, taskHashes)
+                    writeArchive(stageName, digest, collected, channelTypes, taskHashes)
                 }
             } as Closure)
 
@@ -124,7 +130,7 @@ class StageArchive {
 
     // -- private --
 
-    private void writeArchive(String stageName, String digest, Map<String, List<Object>> collected, List<String> taskHashes) {
+    private void writeArchive(String stageName, String digest, Map<String, List<Object>> collected, Map<String, String> channelTypes, List<String> taskHashes) {
         final path = archivePath(stageName, digest)
         if( Files.exists(path.resolve('stage.json')) ) return
 
@@ -132,6 +138,7 @@ class StageArchive {
 
         final channelsJson = new LinkedHashMap<String, Map>()
         for( final chEntry : collected.entrySet() ) {
+            final name = chEntry.key
             final itemsJson = new ArrayList<List>()
             int idx = 0
             for( final value : chEntry.value ) {
@@ -139,7 +146,7 @@ class StageArchive {
                 itemsJson.add(serializeValue(value, itemDir))
                 idx++
             }
-            channelsJson.put(chEntry.key, [items: itemsJson])
+            channelsJson.put(name, [type: channelTypes.get(name), items: itemsJson])
         }
 
         final stageData = [
