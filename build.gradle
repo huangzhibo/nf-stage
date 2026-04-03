@@ -1,0 +1,21 @@
+plugins {
+    id 'io.nextflow.nextflow-plugin' version '1.0.0-beta.10'
+}
+
+version = '0.1.0'
+
+nextflowPlugin {
+    nextflowVersion = '26.03.1-edge'
+
+    provider = 'nextflow'
+    className = 'nextflow.plugin.StagePlugin'
+    extensionPoints = [
+        'nextflow.plugin.StageExtension',
+        'nextflow.plugin.StageFactory'
+    ]
+}
+
+repositories {
+    mavenLocal()
+    maven { url 'https://s3-eu-west-1.amazonaws.com/maven.seqera.io/snapshots' }
+}
