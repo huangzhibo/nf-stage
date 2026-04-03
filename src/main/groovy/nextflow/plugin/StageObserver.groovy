@@ -74,7 +74,6 @@ class StageObserver implements WorkflowInterceptor {
         init()
         final workflow = (WorkflowDef) workflowObj
         final name = workflow.name
-        final declaredOutputs = workflow.@declaredOutputs as List<String>
 
         // separate channel args (create clones) and static args (hash immediately)
         final channelInfos = new ArrayList<Map>()
@@ -95,23 +94,26 @@ class StageObserver implements WorkflowInterceptor {
         final staticDigestPart = staticHasher.hash().toString()
 
         // proceed — processes register with clone channels as input
-        final realOutput = proceed.call()
+        final realOutput = proceed.call() as ChannelOut
 
-        // create placeholder output channels (returned to downstream)
+        // get output names and channel types from realOutput
+        final outputNames = realOutput.getNames() as List<String>
+        final outputIsValue = new LinkedHashMap<String, Boolean>()
         final placeholderChannels = new LinkedHashMap<String, DataflowWriteChannel>()
-        for( final outName : declaredOutputs ) {
-            final realCh = ((ChannelOut) realOutput).getProperty(outName)
-            placeholderChannels.put(outName, CH.create(CH.isValue(realCh)))
+        for( final outName : outputNames ) {
+            final realCh = realOutput.getProperty(outName)
+            final isValue = CH.isValue(realCh)
+            outputIsValue.put(outName, isValue)
+            placeholderChannels.put(outName, CH.create(isValue))
         }
         final placeholder = new ChannelOut(placeholderChannels)
 
         if( channelInfos.isEmpty() ) {
-            // no channel args — pure static input, decide immediately
             handleResult(name, "sha256:${staticDigestPart}", realOutput,
-                        placeholderChannels, declaredOutputs, channelInfos, null)
+                        placeholderChannels, outputNames, outputIsValue,
+                        channelInfos, null)
         }
         else {
-            // subscribe to all original channels, collect values, then decide
             final collected = new LinkedHashMap<Integer, List<Object>>()
             final pending = new AtomicInteger(channelInfos.size())
 
@@ -129,13 +131,15 @@ class StageObserver implements WorkflowInterceptor {
                             final contentHasher = Hashing.sha256().newHasher()
                             contentHasher.putUnencodedChars(staticDigestPart)
                             for( final entry : collected.entrySet() ) {
-                                // use SHA256 mode so file paths with same content produce same hash
-                                new HashBuilder().withHasher(contentHasher).withMode(CacheHelper.HashMode.SHA256).with(entry.value)
+                                new HashBuilder()
+                                    .withHasher(contentHasher)
+                                    .withMode(CacheHelper.HashMode.SHA256)
+                                    .with(entry.value)
                             }
                             final digest = "sha256:${contentHasher.hash().toString()}"
 
                             handleResult(name, digest, realOutput,
-                                        placeholderChannels, declaredOutputs,
+                                        placeholderChannels, outputNames, outputIsValue,
                                         channelInfos, collected)
                         }
                     } as Closure
@@ -146,9 +150,10 @@ class StageObserver implements WorkflowInterceptor {
         return placeholder
     }
 
-    private void handleResult(String name, String digest, Object realOutput,
+    private void handleResult(String name, String digest, ChannelOut realOutput,
                              Map<String, DataflowWriteChannel> placeholderChannels,
-                             List<String> declaredOutputs,
+                             List<String> outputNames,
+                             Map<String, Boolean> outputIsValue,
                              List<Map> channelInfos,
                              Map<Integer, List<Object>> collected) {
         log.debug "Stage ${name} digest: ${digest}"
@@ -164,9 +169,7 @@ class StageObserver implements WorkflowInterceptor {
         }
         else {
             log.info "Executing stage ${name} (no archive found)"
-            // forward realOutput → placeholder
-            forwardOutputs(realOutput as ChannelOut, placeholderChannels, declaredOutputs)
-            // feed collected values to clones → processes start
+            forwardOutputs(realOutput, placeholderChannels, outputNames, outputIsValue)
             if( collected != null ) {
                 for( final info : channelInfos ) {
                     final idx = info.index as int
@@ -176,7 +179,7 @@ class StageObserver implements WorkflowInterceptor {
                     ((DataflowWriteChannel) info.clone).bind(Channel.STOP)
                 }
             }
-            archive.archive(session, name, digest, realOutput as ChannelOut)
+            archive.archive(session, name, digest, realOutput)
             archivedStages.put(name, digest)
         }
     }
@@ -203,18 +206,26 @@ class StageObserver implements WorkflowInterceptor {
                     ch.bind(StageArchive.rebuildValue(elements as List<Map>, basePath.resolve(String.valueOf(idx))))
                     idx++
                 }
-                ch.bind(Channel.STOP)
+                if( !isValue )
+                    ch.bind(Channel.STOP)
             }
         }
     }
 
-    private void forwardOutputs(ChannelOut realOutput, Map<String, DataflowWriteChannel> placeholderChannels, List<String> declaredOutputs) {
-        for( final outName : declaredOutputs ) {
+    private void forwardOutputs(ChannelOut realOutput,
+                               Map<String, DataflowWriteChannel> placeholderChannels,
+                               List<String> outputNames,
+                               Map<String, Boolean> outputIsValue) {
+        for( final outName : outputNames ) {
             final srcCh = CH.getReadChannel(realOutput.getProperty(outName))
             final dstCh = placeholderChannels.get(outName)
+            final isValue = outputIsValue.get(outName)
             DataflowHelper.subscribeImpl(srcCh, [
                 onNext: { Object value -> dstCh.bind(value) } as Closure,
-                onComplete: { dstCh.bind(Channel.STOP) } as Closure
+                onComplete: {
+                    if( !isValue )
+                        dstCh.bind(Channel.STOP)
+                } as Closure
             ] as Map<String, Closure>)
         }
     }
