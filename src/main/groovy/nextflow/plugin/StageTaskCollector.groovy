@@ -44,10 +44,10 @@ class StageTaskCollector implements TraceObserver {
 
     @Override
     void onFlowComplete() {
-        final archive = stageObserver.archive
+        final archive = stageObserver.getArchive()
         if( archive == null ) return
 
-        for( final entry : stageObserver.archivedStages.entrySet() ) {
+        for( final entry : stageObserver.getArchivedStages().entrySet() ) {
             final stageName = entry.key
             final digest = entry.value
             final taskHashes = stageTasks.remove(stageName) ?: []

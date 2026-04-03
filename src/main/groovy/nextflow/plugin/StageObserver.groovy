@@ -39,31 +39,53 @@ import nextflow.util.HashBuilder
  * Intercepts named workflow execution to provide
  * stage-level archiving and resume capabilities.
  *
- * Uses a unified clone-channel approach: all channel args are
- * cloned, values collected via subscription, and digest computed
- * from actual content. No tracked/untracked distinction.
+ * Uses a unified clone-channel approach:
+ * 1. All channel args are cloned and replaced in args[]
+ *    (proceed closure captures the same array reference,
+ *    so processes register with clone channels as input)
+ * 2. Original channels are subscribed to collect values
+ * 3. After all values arrive, digest is computed from content
+ * 4. If archive matches: emit archived data, stop clones
+ *    If no match: forward values to clones, processes execute
  */
 @Slf4j
 class StageObserver implements WorkflowInterceptor {
 
+    /** Info about a cloned channel arg */
+    static class ClonedChannel {
+        final int argIndex
+        final Object original
+        final DataflowWriteChannel clone
+
+        ClonedChannel(int argIndex, Object original, DataflowWriteChannel clone) {
+            this.argIndex = argIndex
+            this.original = original
+            this.clone = clone
+        }
+    }
+
     private Session session
 
-    StageArchive archive
+    private StageArchive archive0
 
     private Path cachedStagesTsv
 
-    final ConcurrentHashMap<String, String> archivedStages = new ConcurrentHashMap<>()
+    private final ConcurrentHashMap<String, String> archivedStages0 = new ConcurrentHashMap<>()
 
     private boolean initialized
 
-    private boolean headerWritten
+    private volatile boolean headerWritten
+
+    StageArchive getArchive() { archive0 }
+
+    Map<String, String> getArchivedStages() { archivedStages0 }
 
     private void init() {
         if( initialized ) return
         this.session = Global.session as Session
         final config = (session.config.navigate('stage') ?: Collections.emptyMap()) as Map
         final archiveRoot = (config.get('archiveRoot') ?: '.nf-stage-archive') as String
-        this.archive = new StageArchive(session.baseDir.resolve(archiveRoot) as Path)
+        this.archive0 = new StageArchive(session.baseDir.resolve(archiveRoot) as Path)
         this.cachedStagesTsv = Path.of('cached-stages.tsv')
         this.initialized = true
         log.debug "Stage interceptor initialized, archive root: ${archiveRoot}"
@@ -75,8 +97,10 @@ class StageObserver implements WorkflowInterceptor {
         final workflow = (WorkflowDef) workflowObj
         final name = workflow.name
 
-        // separate channel args (create clones) and static args (hash immediately)
-        final channelInfos = new ArrayList<Map>()
+        // clone channel args; hash static args immediately
+        // NOTE: args[] is modified in place so that the proceed closure
+        // (which captures the same array reference) passes clones to the workflow
+        final clonedChannels = new ArrayList<ClonedChannel>()
         final staticHasher = Hashing.sha256().newHasher()
         staticHasher.putUnencodedChars(name)
         final builder = new HashBuilder().withHasher(staticHasher)
@@ -84,7 +108,7 @@ class StageObserver implements WorkflowInterceptor {
         for( int i = 0; i < args.length; i++ ) {
             if( CH.isChannel(args[i]) ) {
                 final clone = CH.create()
-                channelInfos.add([index: i, original: args[i], clone: clone])
+                clonedChannels.add(new ClonedChannel(i, args[i], clone))
                 args[i] = clone
             }
             else {
@@ -96,106 +120,150 @@ class StageObserver implements WorkflowInterceptor {
         // proceed — processes register with clone channels as input
         final realOutput = proceed.call() as ChannelOut
 
-        // get output names and channel types from realOutput
+        // build placeholder outputs (returned to downstream)
         final outputNames = realOutput.getNames() as List<String>
         final outputIsValue = new LinkedHashMap<String, Boolean>()
-        final placeholderChannels = new LinkedHashMap<String, DataflowWriteChannel>()
+        final placeholders = new LinkedHashMap<String, DataflowWriteChannel>()
         for( final outName : outputNames ) {
-            final realCh = realOutput.getProperty(outName)
-            final isValue = CH.isValue(realCh)
+            final isValue = CH.isValue(realOutput.getProperty(outName))
             outputIsValue.put(outName, isValue)
-            placeholderChannels.put(outName, CH.create(isValue))
+            placeholders.put(outName, CH.create(isValue))
         }
-        final placeholder = new ChannelOut(placeholderChannels)
 
-        if( channelInfos.isEmpty() ) {
-            handleResult(name, "sha256:${staticDigestPart}", realOutput,
-                        placeholderChannels, outputNames, outputIsValue,
-                        channelInfos, null)
+        if( clonedChannels.isEmpty() ) {
+            onDigestReady(name, "sha256:${staticDigestPart}",
+                         realOutput, placeholders, outputNames, outputIsValue,
+                         clonedChannels, null)
         }
         else {
-            final collected = new LinkedHashMap<Integer, List<Object>>()
-            final pending = new AtomicInteger(channelInfos.size())
-
-            for( final info : channelInfos ) {
-                final idx = info.index as int
-                collected.put(idx, Collections.synchronizedList(new ArrayList()))
-                final readCh = CH.getReadChannel(info.original)
-
-                DataflowHelper.subscribeImpl(readCh, [
-                    onNext: { Object value ->
-                        collected.get(idx).add(value)
-                    } as Closure,
-                    onComplete: {
-                        if( pending.decrementAndGet() == 0 ) {
-                            final contentHasher = Hashing.sha256().newHasher()
-                            contentHasher.putUnencodedChars(staticDigestPart)
-                            for( final entry : collected.entrySet() ) {
-                                new HashBuilder()
-                                    .withHasher(contentHasher)
-                                    .withMode(CacheHelper.HashMode.SHA256)
-                                    .with(entry.value)
-                            }
-                            final digest = "sha256:${contentHasher.hash().toString()}"
-
-                            handleResult(name, digest, realOutput,
-                                        placeholderChannels, outputNames, outputIsValue,
-                                        channelInfos, collected)
-                        }
-                    } as Closure
-                ] as Map<String, Closure>)
-            }
+            subscribeAndCollect(name, staticDigestPart,
+                               realOutput, placeholders, outputNames, outputIsValue,
+                               clonedChannels)
         }
 
-        return placeholder
+        return new ChannelOut(placeholders)
     }
 
-    private void handleResult(String name, String digest, ChannelOut realOutput,
-                             Map<String, DataflowWriteChannel> placeholderChannels,
-                             List<String> outputNames,
-                             Map<String, Boolean> outputIsValue,
-                             List<Map> channelInfos,
-                             Map<Integer, List<Object>> collected) {
+    /**
+     * Subscribe to all original channels, collect values,
+     * compute digest when all complete, then decide.
+     */
+    private void subscribeAndCollect(String name, String staticDigestPart,
+                                    ChannelOut realOutput,
+                                    Map<String, DataflowWriteChannel> placeholders,
+                                    List<String> outputNames,
+                                    Map<String, Boolean> outputIsValue,
+                                    List<ClonedChannel> clonedChannels) {
+        final collected = new LinkedHashMap<Integer, List<Object>>()
+        final pending = new AtomicInteger(clonedChannels.size())
+
+        for( final cc : clonedChannels ) {
+            collected.put(cc.argIndex, Collections.synchronizedList(new ArrayList()))
+
+            DataflowHelper.subscribeImpl(CH.getReadChannel(cc.original), [
+                onNext: { Object value ->
+                    collected.get(cc.argIndex).add(value)
+                } as Closure,
+                onComplete: {
+                    if( pending.decrementAndGet() == 0 ) {
+                        final digest = computeContentDigest(staticDigestPart, collected)
+                        onDigestReady(name, digest,
+                                     realOutput, placeholders, outputNames, outputIsValue,
+                                     clonedChannels, collected)
+                    }
+                } as Closure
+            ] as Map<String, Closure>)
+        }
+    }
+
+    private String computeContentDigest(String staticDigestPart, Map<Integer, List<Object>> collected) {
+        final hasher = Hashing.sha256().newHasher()
+        hasher.putUnencodedChars(staticDigestPart)
+        for( final entry : collected.entrySet() ) {
+            new HashBuilder()
+                .withHasher(hasher)
+                .withMode(CacheHelper.HashMode.SHA256)
+                .with(entry.value)
+        }
+        return "sha256:${hasher.hash().toString()}"
+    }
+
+    /**
+     * Digest is ready. Check archive and either restore or execute.
+     */
+    private void onDigestReady(String name, String digest,
+                              ChannelOut realOutput,
+                              Map<String, DataflowWriteChannel> placeholders,
+                              List<String> outputNames,
+                              Map<String, Boolean> outputIsValue,
+                              List<ClonedChannel> clonedChannels,
+                              Map<Integer, List<Object>> collected) {
         log.debug "Stage ${name} digest: ${digest}"
 
-        final cached = archive.findArchive(name, digest)
-        if( cached != null ) {
-            log.info "Restoring stage ${name} from archive"
-            emitArchivedData(cached, placeholderChannels)
-            for( final info : channelInfos ) {
-                ((DataflowWriteChannel) info.clone).bind(Channel.STOP)
+        try {
+            final cached = archive0.findArchive(name, digest)
+            if( cached != null ) {
+                restoreFromArchive(name, cached, placeholders, clonedChannels)
             }
-            writeCachedStageTsv(cached)
+            else {
+                executeAndArchive(name, digest, realOutput,
+                                 placeholders, outputNames, outputIsValue,
+                                 clonedChannels, collected)
+            }
         }
-        else {
-            log.info "Executing stage ${name} (no archive found)"
-            forwardOutputs(realOutput, placeholderChannels, outputNames, outputIsValue)
-            if( collected != null ) {
-                for( final info : channelInfos ) {
-                    final idx = info.index as int
-                    for( final value : collected.get(idx) ) {
-                        ((DataflowWriteChannel) info.clone).bind(value)
-                    }
-                    ((DataflowWriteChannel) info.clone).bind(Channel.STOP)
-                }
-            }
-            archive.archive(session, name, digest, realOutput)
-            archivedStages.put(name, digest)
+        catch( Exception e ) {
+            log.error "Stage ${name} archive/restore failed, falling back to normal execution: ${e.message}", e
+            forwardOutputs(realOutput, placeholders, outputNames, outputIsValue)
+            feedClones(clonedChannels, collected)
         }
     }
 
-    private void emitArchivedData(Map stageData, Map<String, DataflowWriteChannel> placeholderChannels) {
+    private void restoreFromArchive(String name, Map cached,
+                                   Map<String, DataflowWriteChannel> placeholders,
+                                   List<ClonedChannel> clonedChannels) {
+        log.info "Restoring stage ${name} from archive"
+        emitArchivedData(cached, placeholders)
+        for( final cc : clonedChannels ) {
+            cc.clone.bind(Channel.STOP)
+        }
+        writeCachedStageTsv(cached)
+    }
+
+    private void executeAndArchive(String name, String digest,
+                                  ChannelOut realOutput,
+                                  Map<String, DataflowWriteChannel> placeholders,
+                                  List<String> outputNames,
+                                  Map<String, Boolean> outputIsValue,
+                                  List<ClonedChannel> clonedChannels,
+                                  Map<Integer, List<Object>> collected) {
+        log.info "Executing stage ${name} (no archive found)"
+        forwardOutputs(realOutput, placeholders, outputNames, outputIsValue)
+        feedClones(clonedChannels, collected)
+        archive0.archive(session, name, digest, realOutput)
+        archivedStages0.put(name, digest)
+    }
+
+    private void feedClones(List<ClonedChannel> clonedChannels, Map<Integer, List<Object>> collected) {
+        if( collected == null ) return
+        for( final cc : clonedChannels ) {
+            for( final value : collected.get(cc.argIndex) ) {
+                cc.clone.bind(value)
+            }
+            cc.clone.bind(Channel.STOP)
+        }
+    }
+
+    private void emitArchivedData(Map stageData, Map<String, DataflowWriteChannel> placeholders) {
         final stageName = stageData.get('stage') as String
         final digest = stageData.get('compatibility_digest') as String
-        final basePath = archive.archivePath(stageName, digest)
+        final basePath = archive0.archivePath(stageName, digest)
         final channelsData = stageData.get('channels') as Map<String, Map>
 
         for( final entry : channelsData.entrySet() ) {
-            final outName = entry.key
             final chData = entry.value
             final items = chData.get('items') as List<List>
             final isValue = chData.get('type') == 'value'
-            final ch = placeholderChannels.get(outName)
+            final ch = placeholders.get(entry.key)
 
             if( isValue && items.size() == 1 ) {
                 ch.bind(StageArchive.rebuildValue(items[0] as List<Map>, basePath.resolve('0')))
@@ -213,12 +281,12 @@ class StageObserver implements WorkflowInterceptor {
     }
 
     private void forwardOutputs(ChannelOut realOutput,
-                               Map<String, DataflowWriteChannel> placeholderChannels,
+                               Map<String, DataflowWriteChannel> placeholders,
                                List<String> outputNames,
                                Map<String, Boolean> outputIsValue) {
         for( final outName : outputNames ) {
             final srcCh = CH.getReadChannel(realOutput.getProperty(outName))
-            final dstCh = placeholderChannels.get(outName)
+            final dstCh = placeholders.get(outName)
             final isValue = outputIsValue.get(outName)
             DataflowHelper.subscribeImpl(srcCh, [
                 onNext: { Object value -> dstCh.bind(value) } as Closure,
@@ -230,12 +298,12 @@ class StageObserver implements WorkflowInterceptor {
         }
     }
 
-    private void writeCachedStageTsv(Map stageData) {
+    private synchronized void writeCachedStageTsv(Map stageData) {
         final stage = stageData.get('stage') as String
         final digest = stageData.get('compatibility_digest') as String
         final taskHashes = stageData.get('task_hashes') as List ?: []
         final archivedAt = stageData.get('created_at') as String
-        final archivePath = archive.archivePath(stage, digest)
+        final archivePath = archive0.archivePath(stage, digest)
 
         if( !headerWritten ) {
             Files.write(cachedStagesTsv, "stage\tdigest\ttask_count\tarchive_path\tarchived_at\n".getBytes())

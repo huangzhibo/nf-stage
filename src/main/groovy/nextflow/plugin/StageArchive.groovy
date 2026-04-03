@@ -54,24 +54,47 @@ class StageArchive {
 
         final collected = new LinkedHashMap<String, List<Object>>()
         final channelTypes = new LinkedHashMap<String, String>()
-        final pending = new AtomicInteger(names.size())
+        int queueCount = 0
 
+        // collect value channels immediately (already bound)
+        // subscribe to queue channels asynchronously
         for( final name : names ) {
-            collected.put(name, Collections.synchronizedList(new ArrayList<Object>()))
-            final ch = output.getProperty(name)
-            channelTypes.put(name, CH.isValue(ch) ? 'value' : 'queue')
-            final readCh = CH.getReadChannel(ch)
+            final String chName = name
+            final ch = output.getProperty(chName)
+            final isValue = CH.isValue(ch)
+            channelTypes.put(chName, isValue ? 'value' : 'queue')
 
-            final events = new HashMap<String, Closure>(2)
-            events.put('onNext', { Object value ->
-                collected.get(name).add(value)
-            } as Closure)
-            events.put('onComplete', {
-                if( pending.decrementAndGet() == 0 )
-                    writeArchive(stageName, digest, collected, channelTypes)
-            } as Closure)
+            if( isValue ) {
+                // DataflowVariable: value already bound, read directly
+                final value = ((groovyx.gpars.dataflow.DataflowReadChannel) ch).getVal()
+                collected.put(chName, [value])
+            }
+            else {
+                collected.put(chName, Collections.synchronizedList(new ArrayList<Object>()))
+                queueCount++
+            }
+        }
 
-            DataflowHelper.subscribeImpl(readCh, events)
+        if( queueCount == 0 ) {
+            writeArchive(stageName, digest, collected, channelTypes)
+            return
+        }
+
+        final pending = new AtomicInteger(queueCount)
+        for( final name : names ) {
+            final String chName = name
+            if( channelTypes.get(chName) == 'value' ) continue
+
+            final readCh = CH.getReadChannel(output.getProperty(chName))
+            DataflowHelper.subscribeImpl(readCh, [
+                onNext: { Object value ->
+                    collected.get(chName).add(value)
+                } as Closure,
+                onComplete: {
+                    if( pending.decrementAndGet() == 0 )
+                        writeArchive(stageName, digest, collected, channelTypes)
+                } as Closure
+            ] as Map<String, Closure>)
         }
     }
 
