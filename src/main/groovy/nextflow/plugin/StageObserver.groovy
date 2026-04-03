@@ -62,7 +62,7 @@ class StageObserver implements WorkflowInterceptor {
         final config = (session.config.navigate('stage') ?: Collections.emptyMap()) as Map
         final archiveRoot = (config.get('archiveRoot') ?: '.nf-stage-archive') as String
         this.archive = new StageArchive(session.baseDir.resolve(archiveRoot) as Path)
-        this.cachedStagesTsv = session.baseDir.resolve('cached-stages.tsv')
+        this.cachedStagesTsv = Path.of('cached-stages.tsv')
         this.initialized = true
         log.debug "Stage interceptor initialized, archive root: ${archiveRoot}"
     }
