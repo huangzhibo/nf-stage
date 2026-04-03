@@ -217,6 +217,34 @@ test_no_plugin() {
 }
 
 # ------------------------------------------------------------------
+# Test 12: Untracked channel (Channel.of directly passed)
+# ------------------------------------------------------------------
+test_untracked_channel() {
+    cleanup
+    $NXF run test-untracked-channel.nf > "$LAST_OUTPUT" 2>&1 || true
+    assert_completed 2
+
+    rm -rf .nextflow .nextflow.log* work
+    $NXF run test-untracked-channel.nf > "$LAST_OUTPUT" 2>&1 || true
+    assert_completed 0
+    assert_cached_stages 1
+}
+
+# ------------------------------------------------------------------
+# Test 13: Untracked process output passed to named workflow
+# ------------------------------------------------------------------
+test_untracked_process() {
+    cleanup
+    $NXF run test-untracked-process.nf > "$LAST_OUTPUT" 2>&1 || true
+    assert_completed 3  # BUILD_INDEX(1) + ALIGN_READS(2)
+
+    rm -rf .nextflow .nextflow.log* work
+    $NXF run test-untracked-process.nf > "$LAST_OUTPUT" 2>&1 || true
+    assert_completed 1  # BUILD_INDEX reruns (outside stage), ALIGN_STAGE cached
+    assert_cached_stages 1
+}
+
+# ------------------------------------------------------------------
 # Run all tests
 # ------------------------------------------------------------------
 run_test "basic"               test_basic
@@ -230,6 +258,8 @@ run_test "chain-last"          test_chain_last
 run_test "chain-middle"        test_chain_middle
 run_test "fan-in"              test_fan_in
 run_test "no-plugin"           test_no_plugin
+run_test "untracked-channel"   test_untracked_channel
+run_test "untracked-process"   test_untracked_process
 
 echo ""
 echo "================================"

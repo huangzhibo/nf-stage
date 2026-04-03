@@ -13,8 +13,6 @@ import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
-import groovyx.gpars.dataflow.DataflowWriteChannel
-import nextflow.Channel
 import nextflow.Session
 import nextflow.extension.CH
 import nextflow.extension.DataflowHelper
@@ -48,41 +46,6 @@ class StageArchive {
             log.debug "Failed to read stage.json at ${stageJson}: ${e.message}"
         }
         return null
-    }
-
-    ChannelOut restore(Session session, Map data) {
-        final stageName = data.get('stage') as String
-        final digest = data.get('compatibility_digest') as String
-        final basePath = archivePath(stageName, digest)
-        final channelsData = data.get('channels') as Map<String, Map>
-        final channels = new LinkedHashMap<String, DataflowWriteChannel>()
-
-        for( final entry : channelsData.entrySet() ) {
-            final name = entry.key
-            final chData = entry.value
-            final items = chData.get('items') as List<List>
-            final isValue = chData.get('type') == 'value'
-            final ch = CH.create(isValue)
-            channels.put(name, ch)
-
-            session.addIgniter {
-                if( isValue && items.size() == 1 ) {
-                    final itemDir = basePath.resolve('0')
-                    ch.bind(rebuildValue(items[0] as List<Map>, itemDir))
-                }
-                else {
-                    int idx = 0
-                    for( final elements : items ) {
-                        final itemDir = basePath.resolve(String.valueOf(idx))
-                        ch.bind(rebuildValue(elements as List<Map>, itemDir))
-                        idx++
-                    }
-                    ch.bind(Channel.STOP)
-                }
-            }
-        }
-
-        return new ChannelOut(channels)
     }
 
     void archive(Session session, String stageName, String digest, ChannelOut output) {
@@ -187,7 +150,7 @@ class StageArchive {
         return [type: 'value', data: el]
     }
 
-    private static Object rebuildValue(List<Map> elements, Path itemDir) {
+    static Object rebuildValue(List<Map> elements, Path itemDir) {
         if( elements.size() == 1 )
             return rebuildElement(elements[0], itemDir)
         return elements.collect { rebuildElement(it, itemDir) }
