@@ -72,7 +72,7 @@ class StageObserver implements WorkflowInterceptor {
 
     private final ConcurrentHashMap<String, String> archivedStages0 = new ConcurrentHashMap<>()
 
-    private boolean initialized
+    private volatile boolean initialized
 
     private volatile boolean headerWritten
 
@@ -238,9 +238,9 @@ class StageObserver implements WorkflowInterceptor {
                                   List<ClonedChannel> clonedChannels,
                                   Map<Integer, List<Object>> collected) {
         log.info "Executing stage ${name} (no archive found)"
-        forwardOutputs(realOutput, placeholders, outputNames, outputIsValue)
+        // single subscription: forward to placeholder AND collect for archiving
+        forwardAndCollectOutputs(realOutput, placeholders, outputNames, outputIsValue, name, digest)
         feedClones(clonedChannels, collected)
-        archive0.archive(session, name, digest, realOutput)
         archivedStages0.put(name, digest)
     }
 
@@ -281,6 +281,21 @@ class StageObserver implements WorkflowInterceptor {
         }
     }
 
+    /**
+     * Forward realOutput to placeholders (for downstream) AND collect for archiving,
+     * using a single subscription per channel to avoid double-consume on DataflowQueue.
+     */
+    private void forwardAndCollectOutputs(ChannelOut realOutput,
+                                         Map<String, DataflowWriteChannel> placeholders,
+                                         List<String> outputNames,
+                                         Map<String, Boolean> outputIsValue,
+                                         String stageName, String digest) {
+        archive0.archiveWithForward(session, stageName, digest, realOutput, placeholders, outputIsValue)
+    }
+
+    /**
+     * Forward realOutput to placeholders only (used in error fallback path).
+     */
     private void forwardOutputs(ChannelOut realOutput,
                                Map<String, DataflowWriteChannel> placeholders,
                                List<String> outputNames,

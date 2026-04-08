@@ -13,6 +13,8 @@ import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
+import groovyx.gpars.dataflow.DataflowWriteChannel
+import nextflow.Channel
 import nextflow.Session
 import nextflow.extension.CH
 import nextflow.extension.DataflowHelper
@@ -98,15 +100,81 @@ class StageArchive {
         }
     }
 
+    /**
+     * Single-subscription archive+forward: subscribe to realOutput once,
+     * forward values to placeholders AND collect for archiving.
+     */
+    void archiveWithForward(Session session, String stageName, String digest, ChannelOut output,
+                           Map<String, DataflowWriteChannel> placeholders, Map<String, Boolean> outputIsValue) {
+        final names = output.getNames()
+        if( !names ) return
+
+        final collected = new LinkedHashMap<String, List<Object>>()
+        final channelTypes = new LinkedHashMap<String, String>()
+        int queueCount = 0
+
+        for( final name : names ) {
+            final String chName = name
+            final ch = output.getProperty(chName)
+            final isValue = CH.isValue(ch)
+            channelTypes.put(chName, isValue ? 'value' : 'queue')
+
+            if( isValue ) {
+                final value = ((groovyx.gpars.dataflow.DataflowReadChannel) ch).getVal()
+                collected.put(chName, [value])
+                // forward value channel to placeholder
+                final dstCh = placeholders.get(chName)
+                if( dstCh != null )
+                    dstCh.bind(value)
+            }
+            else {
+                collected.put(chName, Collections.synchronizedList(new ArrayList<Object>()))
+                queueCount++
+            }
+        }
+
+        if( queueCount == 0 ) {
+            writeArchive(stageName, digest, collected, channelTypes)
+            return
+        }
+
+        final pending = new AtomicInteger(queueCount)
+        for( final name : names ) {
+            final String chName = name
+            if( channelTypes.get(chName) == 'value' ) continue
+
+            final DataflowWriteChannel capturedDst = placeholders.get(chName)
+            final readCh = CH.getReadChannel(output.getProperty(chName))
+            DataflowHelper.subscribeImpl(readCh, [
+                onNext: { Object value ->
+                    collected.get(chName).add(value)
+                    if( capturedDst != null )
+                        capturedDst.bind(value)
+                } as Closure,
+                onComplete: {
+                    if( capturedDst != null )
+                        capturedDst.bind(Channel.STOP)
+                    if( pending.decrementAndGet() == 0 )
+                        writeArchive(stageName, digest, collected, channelTypes)
+                } as Closure
+            ] as Map<String, Closure>)
+        }
+    }
+
     void patchTaskHashes(String stageName, String digest, List<String> taskHashes) {
         final stageJson = archivePath(stageName, digest).resolve('stage.json')
         if( !Files.exists(stageJson) ) return
 
-        final data = new JsonSlurper().parse(stageJson.toFile()) as Map
-        data.put('task_hashes', taskHashes)
-        final json = JsonOutput.prettyPrint(JsonOutput.toJson(data))
-        Files.write(stageJson, json.getBytes('UTF-8'))
-        log.debug "Patched task_hashes for stage ${stageName}: ${taskHashes.size()} tasks"
+        try {
+            final data = new JsonSlurper().parse(stageJson.toFile()) as Map
+            data.put('task_hashes', taskHashes)
+            final json = JsonOutput.prettyPrint(JsonOutput.toJson(data))
+            Files.write(stageJson, json.getBytes('UTF-8'))
+            log.debug "Patched task_hashes for stage ${stageName}: ${taskHashes.size()} tasks"
+        }
+        catch( Exception e ) {
+            log.warn "Failed to patch task_hashes for stage ${stageName}: ${e.message}"
+        }
     }
 
     Path archivePath(String stageName, String digest) {
