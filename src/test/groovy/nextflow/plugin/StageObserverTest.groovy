@@ -1,19 +1,20 @@
 package nextflow.plugin
 
-import nextflow.Session
 import spock.lang.Specification
 
 class StageObserverTest extends Specification {
 
-    def 'StageFactory should create StageTaskCollector when interceptor is available' () {
-        // Note: full integration testing is done via validation/run-tests.sh
-        // This test verifies the factory produces the expected observer type
+    def 'ClonedChannel should store argIndex, original and clone' () {
         given:
-        def factory = new StageFactory()
+        def original = new Object()
+        def clone = new Object() as groovyx.gpars.dataflow.DataflowWriteChannel
+
         when:
-        def result = factory.create(Mock(Session))
+        def cc = new StageObserver.ClonedChannel(2, original, clone)
+
         then:
-        // StageFactory returns empty when no WorkflowInterceptor is registered
-        result.size() == 0
+        cc.argIndex == 2
+        cc.original.is(original)
+        cc.clone.is(clone)
     }
 }
