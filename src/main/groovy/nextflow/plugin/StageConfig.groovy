@@ -18,10 +18,15 @@ class StageConfig implements ConfigScope {
     @Description("Root directory for stage archives (default: `.nf-stage-archive`).")
     final String archiveRoot
 
+    @ConfigOption
+    @Description("File path for cached stages TSV (default: `cached-stages.tsv`).")
+    final String cachedStagesFile
+
     /* required by extension point */
     StageConfig() {}
 
     StageConfig(Map opts) {
         this.archiveRoot = opts.archiveRoot as String
+        this.cachedStagesFile = opts.cachedStagesFile as String
     }
 }

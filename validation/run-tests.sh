@@ -11,8 +11,18 @@ PASS=0
 FAIL=0
 LAST_OUTPUT=$(mktemp)
 
+# Each test gets a unique prefix for its work dir, archive dir, and session dir,
+# preventing state leakage between tests while staying in the validation directory.
+TEST_ID=""
+
+nxf_run() {
+    $NXF run -work-dir "work-${TEST_ID}" "$@" > "$LAST_OUTPUT" 2>&1 || true
+}
+
 cleanup() {
-    rm -rf .nextflow .nextflow.log* work .nf-stage-archive cached-stages.tsv 2>/dev/null || true
+    rm -rf ".nextflow" "work-${TEST_ID}" ".nf-stage-archive-${TEST_ID}" \
+           "cached-stages-${TEST_ID}.tsv" ".nf-stage-test-${TEST_ID}.config" \
+           ".nf-stage-noplugin-${TEST_ID}.config" 2>/dev/null || true
 }
 
 assert_completed() {
@@ -27,12 +37,13 @@ assert_completed() {
 
 assert_cached_stages() {
     local expected=$1
-    if [[ ! -f cached-stages.tsv ]]; then
-        echo "  ASSERT FAILED: cached-stages.tsv not found"
+    local tsv="cached-stages-${TEST_ID}.tsv"
+    if [[ ! -f "$tsv" ]]; then
+        echo "  ASSERT FAILED: ${tsv} not found"
         return 1
     fi
     local actual
-    actual=$(tail -n +2 cached-stages.tsv | wc -l | tr -d ' ')
+    actual=$(tail -n +2 "$tsv" | wc -l | tr -d ' ')
     if [[ "$actual" != "$expected" ]]; then
         echo "  ASSERT FAILED: expected ${expected} cached stages, got ${actual}"
         return 1
@@ -48,241 +59,302 @@ assert_file_exists() {
 
 run_test() {
     local name=$1
+    local fn=$2
+    # unique ID per test: test name + timestamp
+    TEST_ID="${name//[^a-zA-Z0-9]/-}-$$"
     echo ""
     echo "=== TEST: ${name} ==="
-    if eval "$2"; then
+    if eval "$fn"; then
         echo "  PASS"
         ((PASS++))
     else
         echo "  FAIL"
         ((FAIL++))
     fi
+    cleanup
+}
+
+# Generate per-test nextflow.config that overrides workDir, archiveRoot, cachedStagesFile
+test_config() {
+    cat > ".nf-stage-test-${TEST_ID}.config" << EOF
+plugins { id 'nf-stage@0.1.0' }
+stage {
+    archiveRoot = '.nf-stage-archive-${TEST_ID}'
+    cachedStagesFile = 'cached-stages-${TEST_ID}.tsv'
+}
+workDir = 'work-${TEST_ID}'
+params {
+    reference = 'GRCh38'
+    dbsnp = 'dbsnp154'
+    param_b = 'v1'
+    param_c = 'v1'
+    expected_total = 100
+    summary_version = 'v1'
+}
+EOF
+    echo ".nf-stage-test-${TEST_ID}.config"
+}
+
+noplugin_config() {
+    cat > ".nf-stage-noplugin-${TEST_ID}.config" << EOF
+workDir = 'work-${TEST_ID}'
+params {
+    reference = 'GRCh38'
+    dbsnp = 'dbsnp154'
+    param_b = 'v1'
+    param_c = 'v1'
+    expected_total = 100
+    summary_version = 'v1'
+}
+EOF
+    echo ".nf-stage-noplugin-${TEST_ID}.config"
+}
+
+between_runs() {
+    # keep archive, drop session/work for next run
+    rm -rf ".nextflow" "work-${TEST_ID}" 2>/dev/null || true
 }
 
 # ------------------------------------------------------------------
 # Test 1: Basic archive and restore
 # ------------------------------------------------------------------
 test_basic() {
-    cleanup
-    $NXF run test-basic.nf > "$LAST_OUTPUT" 2>&1 || true
+    local cfg; cfg=$(test_config)
+    $NXF run test-basic.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 4
 
-    rm -rf .nextflow .nextflow.log* work
-    $NXF run test-basic.nf > "$LAST_OUTPUT" 2>&1 || true
+    between_runs
+    $NXF run test-basic.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 0
     assert_cached_stages 2
+    rm -f "$cfg"
 }
 
 # ------------------------------------------------------------------
 # Test 2: Partial rerun - change last stage param
 # ------------------------------------------------------------------
 test_partial_rerun_last() {
-    cleanup
-    $NXF run test-partial-rerun.nf > "$LAST_OUTPUT" 2>&1 || true
+    local cfg; cfg=$(test_config)
+    $NXF run test-partial-rerun.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 6
 
-    rm -rf .nextflow .nextflow.log* work
-    $NXF run test-partial-rerun.nf --dbsnp dbsnp155 > "$LAST_OUTPUT" 2>&1 || true
-    assert_completed 2   # only CALL_VARIANTS reruns (2 samples)
-    assert_cached_stages 2  # PREPARE + ALIGN cached
+    between_runs
+    $NXF run test-partial-rerun.nf -c "$cfg" -work-dir "work-${TEST_ID}" --dbsnp dbsnp155 > "$LAST_OUTPUT" 2>&1 || true
+    assert_completed 2
+    assert_cached_stages 2
+    rm -f "$cfg"
 }
 
 # ------------------------------------------------------------------
 # Test 3: Partial rerun - change middle stage param
 # ------------------------------------------------------------------
 test_partial_rerun_middle() {
-    cleanup
-    $NXF run test-partial-rerun.nf > "$LAST_OUTPUT" 2>&1 || true
+    local cfg; cfg=$(test_config)
+    $NXF run test-partial-rerun.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 6
 
-    rm -rf .nextflow .nextflow.log* work
-    $NXF run test-partial-rerun.nf --reference hg19 > "$LAST_OUTPUT" 2>&1 || true
-    assert_completed 4   # ALIGN + CALL_VARIANTS rerun (2+2)
-    assert_cached_stages 1  # only PREPARE cached
+    between_runs
+    $NXF run test-partial-rerun.nf -c "$cfg" -work-dir "work-${TEST_ID}" --reference hg19 > "$LAST_OUTPUT" 2>&1 || true
+    assert_completed 4
+    assert_cached_stages 1
+    rm -f "$cfg"
 }
 
 # ------------------------------------------------------------------
 # Test 4: Multi-emit channels
 # ------------------------------------------------------------------
 test_multi_emit() {
-    cleanup
-    $NXF run test-multi-emit.nf > "$LAST_OUTPUT" 2>&1 || true
+    local cfg; cfg=$(test_config)
+    $NXF run test-multi-emit.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 4
 
-    rm -rf .nextflow .nextflow.log* work
-    $NXF run test-multi-emit.nf > "$LAST_OUTPUT" 2>&1 || true
+    between_runs
+    $NXF run test-multi-emit.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 0
-    assert_cached_stages 1  # QC_AND_TRIM
+    assert_cached_stages 1
+    rm -f "$cfg"
 }
 
 # ------------------------------------------------------------------
 # Test 5: Value channel emit
 # ------------------------------------------------------------------
 test_value_channel() {
-    cleanup
-    $NXF run test-value-channel.nf > "$LAST_OUTPUT" 2>&1 || true
+    local cfg; cfg=$(test_config)
+    $NXF run test-value-channel.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 2
 
-    rm -rf .nextflow .nextflow.log* work
-    $NXF run test-value-channel.nf > "$LAST_OUTPUT" 2>&1 || true
+    between_runs
+    $NXF run test-value-channel.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 0
+    rm -f "$cfg"
 }
 
 # ------------------------------------------------------------------
 # Test 6: Single file emit (not tuple)
 # ------------------------------------------------------------------
 test_single_file() {
-    cleanup
-    $NXF run test-single-file.nf > "$LAST_OUTPUT" 2>&1 || true
+    local cfg; cfg=$(test_config)
+    $NXF run test-single-file.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 2
 
-    rm -rf .nextflow .nextflow.log* work
-    $NXF run test-single-file.nf > "$LAST_OUTPUT" 2>&1 || true
+    between_runs
+    $NXF run test-single-file.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 0
+    rm -f "$cfg"
 }
 
 # ------------------------------------------------------------------
 # Test 7: Same filename across samples
 # ------------------------------------------------------------------
 test_same_filename() {
-    cleanup
-    $NXF run test-same-filename.nf > "$LAST_OUTPUT" 2>&1 || true
+    local cfg; cfg=$(test_config)
+    $NXF run test-same-filename.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 2
 
-    rm -rf .nextflow .nextflow.log* work
-    $NXF run test-same-filename.nf > "$LAST_OUTPUT" 2>&1 || true
+    between_runs
+    $NXF run test-same-filename.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 0
 
-    # verify both report.txt files exist and are different
     local f1 f2
-    f1=$(find .nf-stage-archive -path "*/0/report.txt")
-    f2=$(find .nf-stage-archive -path "*/1/report.txt")
+    f1=$(find ".nf-stage-archive-${TEST_ID}" -path "*/0/report.txt" 2>/dev/null)
+    f2=$(find ".nf-stage-archive-${TEST_ID}" -path "*/1/report.txt" 2>/dev/null)
     assert_file_exists "$f1"
     assert_file_exists "$f2"
     if diff -q "$f1" "$f2" > /dev/null 2>&1; then
         echo "  ASSERT FAILED: same-name files should have different content"
+        rm -f "$cfg"
         return 1
     fi
+    rm -f "$cfg"
 }
 
 # ------------------------------------------------------------------
 # Test 8: Three-level chain - change last param
 # ------------------------------------------------------------------
 test_chain_last() {
-    cleanup
-    $NXF run test-chain.nf > "$LAST_OUTPUT" 2>&1 || true
+    local cfg; cfg=$(test_config)
+    $NXF run test-chain.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 6
 
-    rm -rf .nextflow .nextflow.log* work
-    $NXF run test-chain.nf --param_c v2 > "$LAST_OUTPUT" 2>&1 || true
-    assert_completed 2   # only STAGE_C reruns
-    assert_cached_stages 2  # STAGE_A + STAGE_B cached
+    between_runs
+    $NXF run test-chain.nf -c "$cfg" -work-dir "work-${TEST_ID}" --param_c v2 > "$LAST_OUTPUT" 2>&1 || true
+    assert_completed 2
+    assert_cached_stages 2
+    rm -f "$cfg"
 }
 
 # ------------------------------------------------------------------
 # Test 9: Three-level chain - change middle param
 # ------------------------------------------------------------------
 test_chain_middle() {
-    cleanup
-    $NXF run test-chain.nf > "$LAST_OUTPUT" 2>&1 || true
+    local cfg; cfg=$(test_config)
+    $NXF run test-chain.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 6
 
-    rm -rf .nextflow .nextflow.log* work
-    $NXF run test-chain.nf --param_b v2 > "$LAST_OUTPUT" 2>&1 || true
-    assert_completed 4   # STAGE_B + STAGE_C rerun
-    assert_cached_stages 1  # only STAGE_A cached
+    between_runs
+    $NXF run test-chain.nf -c "$cfg" -work-dir "work-${TEST_ID}" --param_b v2 > "$LAST_OUTPUT" 2>&1 || true
+    assert_completed 4
+    assert_cached_stages 1
+    rm -f "$cfg"
 }
 
 # ------------------------------------------------------------------
 # Test 10: Fan-in stage
 # ------------------------------------------------------------------
 test_fan_in() {
-    cleanup
-    $NXF run test-fan-in.nf > "$LAST_OUTPUT" 2>&1 || true
+    local cfg; cfg=$(test_config)
+    $NXF run test-fan-in.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 6
 
-    rm -rf .nextflow .nextflow.log* work
-    $NXF run test-fan-in.nf > "$LAST_OUTPUT" 2>&1 || true
+    between_runs
+    $NXF run test-fan-in.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 0
-    assert_cached_stages 3  # PREPARE + QC + MERGE_STAGE
+    assert_cached_stages 3
+    rm -f "$cfg"
 }
 
 # ------------------------------------------------------------------
 # Test 11: No-plugin compatibility
 # ------------------------------------------------------------------
 test_no_plugin() {
-    cleanup
-    $NXF run test-basic.nf -c nextflow-noplugin.config > "$LAST_OUTPUT" 2>&1 || true
+    local cfg; cfg=$(noplugin_config)
+    $NXF run test-basic.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 4
+    rm -f "$cfg"
 }
 
 # ------------------------------------------------------------------
 # Test 12: Untracked channel (Channel.of directly passed)
 # ------------------------------------------------------------------
 test_untracked_channel() {
-    cleanup
-    $NXF run test-untracked-channel.nf > "$LAST_OUTPUT" 2>&1 || true
+    local cfg; cfg=$(test_config)
+    $NXF run test-untracked-channel.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 2
 
-    rm -rf .nextflow .nextflow.log* work
-    $NXF run test-untracked-channel.nf > "$LAST_OUTPUT" 2>&1 || true
+    between_runs
+    $NXF run test-untracked-channel.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 0
     assert_cached_stages 1
+    rm -f "$cfg"
 }
 
 # ------------------------------------------------------------------
 # Test 13: Untracked process output passed to named workflow
 # ------------------------------------------------------------------
 test_untracked_process() {
-    cleanup
-    $NXF run test-untracked-process.nf > "$LAST_OUTPUT" 2>&1 || true
-    assert_completed 3  # BUILD_INDEX(1) + ALIGN_READS(2)
+    local cfg; cfg=$(test_config)
+    $NXF run test-untracked-process.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
+    assert_completed 3
 
-    rm -rf .nextflow .nextflow.log* work
-    $NXF run test-untracked-process.nf > "$LAST_OUTPUT" 2>&1 || true
-    assert_completed 1  # BUILD_INDEX reruns (outside stage), ALIGN_STAGE cached
+    between_runs
+    $NXF run test-untracked-process.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
+    assert_completed 1
     assert_cached_stages 1
+    rm -f "$cfg"
 }
 
 # ------------------------------------------------------------------
 # Test 14: Nested named workflows (workflow calls workflow)
 # ------------------------------------------------------------------
 test_nested_workflow() {
-    cleanup
-    $NXF run test-nested-workflow.nf > "$LAST_OUTPUT" 2>&1 || true
-    assert_completed 6  # TRIM_READS(2) + ALIGN_READS(2) + CALL_SNP(2)
+    local cfg; cfg=$(test_config)
+    $NXF run test-nested-workflow.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
+    assert_completed 6
 
-    rm -rf .nextflow .nextflow.log* work
-    $NXF run test-nested-workflow.nf > "$LAST_OUTPUT" 2>&1 || true
+    between_runs
+    $NXF run test-nested-workflow.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 0
+    rm -f "$cfg"
 }
 
 # ------------------------------------------------------------------
 # Test 15: Many samples (10 samples)
 # ------------------------------------------------------------------
 test_many_samples() {
-    cleanup
-    $NXF run test-many-samples.nf > "$LAST_OUTPUT" 2>&1 || true
-    assert_completed 20  # PROCESS_SAMPLE(10) + SUMMARIZE(10)
+    local cfg; cfg=$(test_config)
+    $NXF run test-many-samples.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
+    assert_completed 20
 
-    rm -rf .nextflow .nextflow.log* work
-    $NXF run test-many-samples.nf > "$LAST_OUTPUT" 2>&1 || true
+    between_runs
+    $NXF run test-many-samples.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 0
-    assert_cached_stages 2  # PROCESS_STAGE + SUMMARY_STAGE
+    assert_cached_stages 2
+    rm -f "$cfg"
 }
 
 # ------------------------------------------------------------------
 # Test 16: Many samples - partial rerun with param change
 # ------------------------------------------------------------------
 test_many_samples_partial_rerun() {
-    cleanup
-    $NXF run test-many-samples.nf > "$LAST_OUTPUT" 2>&1 || true
+    local cfg; cfg=$(test_config)
+    $NXF run test-many-samples.nf -c "$cfg" -work-dir "work-${TEST_ID}" > "$LAST_OUTPUT" 2>&1 || true
     assert_completed 20
 
-    rm -rf .nextflow .nextflow.log* work
-    $NXF run test-many-samples.nf --summary_version v2 > "$LAST_OUTPUT" 2>&1 || true
-    assert_completed 10  # only SUMMARY_STAGE reruns (10 samples)
-    assert_cached_stages 1  # only PROCESS_STAGE cached
+    between_runs
+    $NXF run test-many-samples.nf -c "$cfg" -work-dir "work-${TEST_ID}" --summary_version v2 > "$LAST_OUTPUT" 2>&1 || true
+    assert_completed 10
+    assert_cached_stages 1
+    rm -f "$cfg"
 }
 
 # ------------------------------------------------------------------
@@ -310,6 +382,5 @@ echo "================================"
 echo "Results: ${PASS} passed, ${FAIL} failed"
 echo "================================"
 
-cleanup
 rm -f "$LAST_OUTPUT"
 [[ $FAIL -eq 0 ]]
