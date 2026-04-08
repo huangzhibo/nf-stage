@@ -245,6 +245,47 @@ test_untracked_process() {
 }
 
 # ------------------------------------------------------------------
+# Test 14: Nested named workflows (workflow calls workflow)
+# ------------------------------------------------------------------
+test_nested_workflow() {
+    cleanup
+    $NXF run test-nested-workflow.nf > "$LAST_OUTPUT" 2>&1 || true
+    assert_completed 6  # TRIM_READS(2) + ALIGN_READS(2) + CALL_SNP(2)
+
+    rm -rf .nextflow .nextflow.log* work
+    $NXF run test-nested-workflow.nf > "$LAST_OUTPUT" 2>&1 || true
+    assert_completed 0
+}
+
+# ------------------------------------------------------------------
+# Test 15: Many samples (10 samples)
+# ------------------------------------------------------------------
+test_many_samples() {
+    cleanup
+    $NXF run test-many-samples.nf > "$LAST_OUTPUT" 2>&1 || true
+    assert_completed 20  # PROCESS_SAMPLE(10) + SUMMARIZE(10)
+
+    rm -rf .nextflow .nextflow.log* work
+    $NXF run test-many-samples.nf > "$LAST_OUTPUT" 2>&1 || true
+    assert_completed 0
+    assert_cached_stages 2  # PROCESS_STAGE + SUMMARY_STAGE
+}
+
+# ------------------------------------------------------------------
+# Test 16: Many samples - partial rerun with param change
+# ------------------------------------------------------------------
+test_many_samples_partial_rerun() {
+    cleanup
+    $NXF run test-many-samples.nf > "$LAST_OUTPUT" 2>&1 || true
+    assert_completed 20
+
+    rm -rf .nextflow .nextflow.log* work
+    $NXF run test-many-samples.nf --summary_version v2 > "$LAST_OUTPUT" 2>&1 || true
+    assert_completed 10  # only SUMMARY_STAGE reruns (10 samples)
+    assert_cached_stages 1  # only PROCESS_STAGE cached
+}
+
+# ------------------------------------------------------------------
 # Run all tests
 # ------------------------------------------------------------------
 run_test "basic"               test_basic
@@ -260,6 +301,9 @@ run_test "fan-in"              test_fan_in
 run_test "no-plugin"           test_no_plugin
 run_test "untracked-channel"   test_untracked_channel
 run_test "untracked-process"   test_untracked_process
+run_test "nested-workflow"     test_nested_workflow
+run_test "many-samples"        test_many_samples
+run_test "many-samples-rerun"  test_many_samples_partial_rerun
 
 echo ""
 echo "================================"
