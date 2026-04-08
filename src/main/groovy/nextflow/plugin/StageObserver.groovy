@@ -286,14 +286,14 @@ class StageObserver implements WorkflowInterceptor {
                                List<String> outputNames,
                                Map<String, Boolean> outputIsValue) {
         for( final outName : outputNames ) {
+            final DataflowWriteChannel capturedDst = placeholders.get(outName)
+            final boolean capturedIsValue = outputIsValue.get(outName)
             final srcCh = CH.getReadChannel(realOutput.getProperty(outName))
-            final dstCh = placeholders.get(outName)
-            final isValue = outputIsValue.get(outName)
             DataflowHelper.subscribeImpl(srcCh, [
-                onNext: { Object value -> dstCh.bind(value) } as Closure,
+                onNext: { Object value -> capturedDst.bind(value) } as Closure,
                 onComplete: {
-                    if( !isValue )
-                        dstCh.bind(Channel.STOP)
+                    if( !capturedIsValue )
+                        capturedDst.bind(Channel.STOP)
                 } as Closure
             ] as Map<String, Closure>)
         }
