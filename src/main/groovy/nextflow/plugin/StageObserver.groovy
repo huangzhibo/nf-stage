@@ -158,11 +158,12 @@ class StageObserver implements WorkflowInterceptor {
         final pending = new AtomicInteger(clonedChannels.size())
 
         for( final cc : clonedChannels ) {
-            collected.put(cc.argIndex, Collections.synchronizedList(new ArrayList()))
+            final int capturedIndex = cc.argIndex
+            collected.put(capturedIndex, Collections.synchronizedList(new ArrayList()))
 
             DataflowHelper.subscribeImpl(CH.getReadChannel(cc.original), [
                 onNext: { Object value ->
-                    collected.get(cc.argIndex).add(value)
+                    collected.get(capturedIndex).add(value)
                 } as Closure,
                 onComplete: {
                     if( pending.decrementAndGet() == 0 ) {
