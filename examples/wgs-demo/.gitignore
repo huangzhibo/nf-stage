@@ -1,0 +1,5 @@
+work/
+.nextflow*
+.nf-stage-archive/
+results/
+cached-stages*.tsv
