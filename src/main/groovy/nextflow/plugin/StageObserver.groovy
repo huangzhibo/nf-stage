@@ -88,6 +88,7 @@ class StageObserver implements WorkflowInterceptor {
         this.archive0 = new StageArchive(session.baseDir.resolve(archiveRoot) as Path)
         final cachedStagesFile = (config.get('cachedStagesFile') ?: 'cached-stages.tsv') as String
         this.cachedStagesTsv = Path.of(cachedStagesFile)
+        Files.deleteIfExists(this.cachedStagesTsv)
         this.initialized = true
         log.debug "Stage interceptor initialized, archive root: ${archiveRoot}"
     }
