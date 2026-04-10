@@ -20,12 +20,14 @@ workflow {
     if (params.bam_input) {
         // 从已有 BAM 开始，跳过 PREPARE 和 ALIGN
         bam_ch = Channel.fromPath(params.bam_input)
-            .splitCsv(header: true)
+            .splitCsv(header: true, strip: true)
+            .filter { row -> row.sample }
             .map { row -> tuple([id: row.sample], file(row.bam), file(row.bai)) }
     }
     else {
         reads_ch = Channel.fromPath(params.input)
-            .splitCsv(header: true)
+            .splitCsv(header: true, strip: true)
+            .filter { row -> row.sample }
             .map { row -> tuple([id: row.sample], file(row.reads)) }
 
         prepared = PREPARE(reads_ch)
