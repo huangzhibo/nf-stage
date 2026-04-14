@@ -18,6 +18,7 @@ package nextflow.plugin
 
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.Paths
 import java.nio.file.StandardOpenOption
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -85,7 +86,8 @@ class StageObserver implements WorkflowInterceptor {
         this.session = Global.session as Session
         final config = (session.config.navigate('stage') ?: Collections.emptyMap()) as Map
         final archiveRoot = (config.get('archiveRoot') ?: '.nf-stage-archive') as String
-        this.archive0 = new StageArchive(session.baseDir.resolve(archiveRoot) as Path)
+        final launchDir = Paths.get('.').toRealPath()
+        this.archive0 = new StageArchive(launchDir.resolve(archiveRoot) as Path)
         final cachedStagesFile = (config.get('cachedStagesFile') ?: 'cached-stages.tsv') as String
         this.cachedStagesTsv = Path.of(cachedStagesFile)
         Files.deleteIfExists(this.cachedStagesTsv)

@@ -1,14 +1,12 @@
-# nf-stage 插件使用指南
+# nf-stage
 
-## 功能
-
-nf-stage 为 Nextflow 提供阶段级归档与恢复能力。删除 `work/` 目录后，可从归档中恢复已完成的阶段，跳过重复计算。
+Nextflow 插件，提供阶段级归档与复用能力。删除 `work/` 目录后，可从归档中恢复已完成的阶段，跳过重复计算。
 
 ## 前提
 
 需要定制版 Nextflow（含 WorkflowInterceptor 扩展点），官方版本暂不支持。
 
-## 安装
+## 快速开始
 
 ### 1. 构建
 
@@ -58,7 +56,7 @@ exec "$BASEDIR/nextflow" "$@"
 chmod +x $INSTALL_DIR/nextflow-stage
 ```
 
-使用方式与官方 Nextflow 完全一致，不影响现有 Nextflow 环境：
+使用方式与官方 Nextflow 完全一致：
 
 ```bash
 /shared/nextflow-stage/nextflow-stage run main.nf
@@ -81,22 +79,6 @@ stage {
 
 `archiveRoot` 应设为计算节点间共享的路径（NFS/Lustre），以便归档文件在恢复时可访问。
 
-## 流程要求
-
-阶段以 named workflow 定义，入口 workflow 编排阶段：
-
-```nextflow
-include { ALIGN } from './workflows/align'
-include { CALL }  from './workflows/call'
-
-workflow {
-    aligned = ALIGN(params.input, params.reference)
-    result  = CALL(aligned.bam_ch, params.reference)
-}
-```
-
-不需要在流程中编写任何归档/恢复逻辑，插件自动处理。
-
 ## 工作原理
 
 1. **首次运行**：拦截每个 named workflow，计算输入摘要（SHA256），正常执行并将输出归档到 `archiveRoot/<stage>/<digest>/`
@@ -105,7 +87,7 @@ workflow {
 
 ## 产出文件
 
-- `<archiveRoot>/<stage>/<digest>/stage.json`：归档元数据，含通道结构、文件校验和、task hash
+- `<archiveRoot>/<stage>/<digest>/stage.json`：归档元数据
 - `cached-stages.tsv`：本次运行中从归档恢复的阶段记录，供平台读取
 
 `cached-stages.tsv` 格式：
@@ -115,11 +97,15 @@ stage	digest	task_count	archive_path	archived_at
 ALIGN	sha256:abc123...	5	.nf-stage-archive/ALIGN/sha256:abc123...	2025-04-09T10:00:00
 ```
 
-## 注意事项
+## 文档
 
-- 插件仅在 `nextflow.config` 中声明后才会加载，不声明不影响现有流程
-- 每次运行会清空上次的 `cached-stages.tsv`，不会残留旧数据
-- 阶段输出文件变更（内容不同）会产生不同的 digest，自动触发重新执行
+- [流程开发规范](docs/pipeline-guide.md) — 面向流程开发者
+- [平台接入规范](docs/platform-guide.md) — 面向平台开发者
+- [目标架构](docs/design/architecture.md) — 内部架构决策记录
+
+## 示例
+
+参见 [examples/wgs-demo](examples/wgs-demo)。
 
 ## 开发
 
