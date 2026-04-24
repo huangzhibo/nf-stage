@@ -1,5 +1,11 @@
 # nf-stage
 
+[![version](https://img.shields.io/badge/version-0.1.0-58bd9f?style=popout)](https://github.com/huangzhibo/nf-stage/releases)
+[![License](https://img.shields.io/badge/license-Apache%202.0-58bd9f?style=popout)](COPYING)
+<!-- 待 WorkflowInterceptor 补丁合入官方后再恢复：
+[![Nextflow](https://img.shields.io/badge/nextflow-%E2%89%A526.03.1--edge-58bd9f?style=popout)](https://www.nextflow.io/)
+-->
+
 [English](README.md) | **中文**
 
 Nextflow 插件，提供**阶段级归档与复用**能力。删除 `work/` 后可从归档恢复已完成的阶段，跳过重复计算。

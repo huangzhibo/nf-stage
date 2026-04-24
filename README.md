@@ -1,5 +1,11 @@
 # nf-stage
 
+[![version](https://img.shields.io/badge/version-0.1.0-58bd9f?style=popout)](https://github.com/huangzhibo/nf-stage/releases)
+[![License](https://img.shields.io/badge/license-Apache%202.0-58bd9f?style=popout)](COPYING)
+<!-- Restore once the WorkflowInterceptor patch is merged upstream:
+[![Nextflow](https://img.shields.io/badge/nextflow-%E2%89%A526.03.1--edge-58bd9f?style=popout)](https://www.nextflow.io/)
+-->
+
 **English** | [中文](README.zh-CN.md)
 
 A Nextflow plugin that provides **stage-level archiving and reuse**. After deleting `work/`, completed stages can be restored from the archive so you don't recompute them.
