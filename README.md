@@ -6,42 +6,14 @@ A Nextflow plugin that provides **stage-level archiving and reuse**. After delet
 
 ## Requirements
 
-Requires a customized Nextflow build that exposes the `WorkflowInterceptor` extension point; the official distribution does not support this yet.
+A customized Nextflow build that exposes the `WorkflowInterceptor` extension point. The official distribution does not support this yet.
 
-## Quick Start
-
-### Build
+## Install
 
 ```bash
-# Customized Nextflow
-cd nextflow && make assemble
-# Output: build/releases/nextflow-26.03.1-edge-dist
-
-# nf-stage plugin
-cd nf-stage && ./gradlew assemble
-# Output: build/distributions/nf-stage-0.1.0.zip
-```
-
-### Deploy
-
-```bash
-INSTALL_DIR=/shared/nextflow-stage
-
-# Nextflow + plugin
-cp build/releases/nextflow-26.03.1-edge-dist $INSTALL_DIR/nextflow
-chmod +x $INSTALL_DIR/nextflow
-mkdir -p $INSTALL_DIR/plugins/nf-stage-0.1.0
-unzip /path/to/nf-stage-0.1.0.zip -d $INSTALL_DIR/plugins/nf-stage-0.1.0/
-```
-
-Wrapper script (so end users can invoke it directly):
-
-```bash
-#!/bin/bash
-BASEDIR="$(cd "$(dirname "$0")" && pwd)"
-export NXF_JAVA_HOME="$BASEDIR/amazon-corretto-21.x.x.x-linux-x64"
-export NXF_PLUGINS_DIR="$BASEDIR/plugins"
-exec "$BASEDIR/nextflow" "$@"
+make assemble    # build build/distributions/nf-stage-0.1.0.zip
+make install     # install into ~/.nextflow/plugins/
+make test        # run unit tests
 ```
 
 ## Configuration
@@ -132,11 +104,3 @@ ALIGN   sha256:db6fe4b...   4           .nf-stage-archive/ALIGN/db6fe4bca85f1cf2
 ## More
 
 - [docs/design.md](docs/design.md) — design document (terms, schema, compatibility digest, single-writer/many-readers, proposals)
-
-## Development
-
-```bash
-make assemble    # build
-make test        # unit tests
-make install     # install to ~/.nextflow/plugins/
-```
