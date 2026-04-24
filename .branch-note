@@ -1,0 +1,5 @@
+Branch: main (public open-source)
+
+Documentation is in English by default, with Chinese translations under docs/zh/.
+Enterprise-specific content (internal platform integrations, cluster-specific
+deployment notes) lives on the `internal` branch.
