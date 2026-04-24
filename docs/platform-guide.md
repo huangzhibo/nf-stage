@@ -33,6 +33,7 @@ nextflow run main.nf -c platform.config
 stage {
     archiveRoot      = 's3://bucket/nf-stage-archive'  // 归档根目录，默认 .nf-stage-archive
     cachedStagesFile = 'cached-stages.tsv'             // 复用记录文件，默认 cached-stages.tsv
+    writable         = false                           // 只读复用，默认 true（见 3.1）
 }
 ```
 
@@ -40,6 +41,18 @@ stage {
 |--------|------|--------|------|
 | `archiveRoot` | String | `.nf-stage-archive` | 归档根目录，相对于 Nextflow 启动目录解析 |
 | `cachedStagesFile` | String | `cached-stages.tsv` | 记录本次运行中被复用的阶段信息 |
+| `writable` | Boolean | `true` | 本次运行是否允许写入新归档；`false` 表示只读复用 |
+
+### 3.1 一写多读（共享 archiveRoot）
+
+多个运行指向同一 `archiveRoot` 时，当前实现仅支持"一写多读"——同一 digest 的归档由**唯一的写者**（平台统一的预热/CI pipeline）产生，其他用户以读者身份复用。
+
+- **写者**：`writable = true`（默认值），命中则复用归档，未命中则执行并归档
+- **读者**：`writable = false`，命中则复用归档，未命中则正常执行但**不写归档**、不回填 `task_hashes`
+
+**启动探测**：`writable = true` 时，插件在启动阶段会向 `archiveRoot` 写入一个 probe 文件验证写权限。探测失败（如存储层 ACL 禁止）会打印 warn 并自动降级为 `writable = false`，避免流程跑到一半因归档写失败而出错。
+
+**平台侧建议**：交付给普通用户的 `platform.config` 模板中设置 `writable = false`，平台统一的预热/CI 运行中设置 `writable = true`；并在存储层 ACL 上对共享 `archiveRoot` 做写权限隔离作为兜底。
 
 ## 4. 归档路径结构
 

@@ -38,7 +38,7 @@ import nextflow.util.HashBuilder
 
 /**
  * Intercepts named workflow execution to provide
- * stage-level archiving and resume capabilities.
+ * stage-level archiving and reuse capabilities.
  *
  * Uses a unified clone-channel approach:
  * 1. All channel args are cloned and replaced in args[]
@@ -71,6 +71,8 @@ class StageObserver implements WorkflowInterceptor {
 
     private Path cachedStagesTsv
 
+    private boolean writable = true
+
     private final ConcurrentHashMap<String, String> archivedStages0 = new ConcurrentHashMap<>()
 
     private volatile boolean initialized
@@ -91,8 +93,34 @@ class StageObserver implements WorkflowInterceptor {
         final cachedStagesFile = (config.get('cachedStagesFile') ?: 'cached-stages.tsv') as String
         this.cachedStagesTsv = Path.of(cachedStagesFile)
         Files.deleteIfExists(this.cachedStagesTsv)
+        final Object writableOpt = config.get('writable')
+        this.writable = writableOpt == null ? true : (writableOpt as Boolean)
+        if( writable ) {
+            this.writable = probeWritable(launchDir.resolve(archiveRoot) as Path)
+        }
         this.initialized = true
-        log.debug "Stage interceptor initialized, archive root: ${archiveRoot}"
+        log.debug "Stage interceptor initialized, archive root: ${archiveRoot}, writable: ${writable}"
+    }
+
+    /**
+     * Verify archiveRoot is writable by creating and deleting a probe file.
+     * Returns false (and logs a warning) when the probe fails, so the run
+     * degrades to read-only rather than failing later mid-pipeline.
+     */
+    static boolean probeWritable(Path archiveRootPath) {
+        final probe = archiveRootPath.resolve(".nf-stage-write-probe-${UUID.randomUUID()}")
+        try {
+            Files.createDirectories(archiveRootPath)
+            Files.write(probe, new byte[0])
+            return true
+        }
+        catch( Exception e ) {
+            log.warn "Stage archive root is not writable, falling back to read-only mode: ${archiveRootPath} (${e.message})"
+            return false
+        }
+        finally {
+            try { Files.deleteIfExists(probe) } catch( Exception ignore ) {}
+        }
     }
 
     @Override
@@ -194,7 +222,7 @@ class StageObserver implements WorkflowInterceptor {
     }
 
     /**
-     * Digest is ready. Check archive and either restore or execute.
+     * Digest is ready. Check archive and either reuse or execute.
      */
     private void onDigestReady(String name, String digest,
                               ChannelOut realOutput,
@@ -208,7 +236,7 @@ class StageObserver implements WorkflowInterceptor {
         try {
             final cached = archive0.findArchive(name, digest)
             if( cached != null ) {
-                restoreFromArchive(name, cached, placeholders, clonedChannels)
+                reuseFromArchive(name, cached, placeholders, clonedChannels)
             }
             else {
                 executeAndArchive(name, digest, realOutput,
@@ -217,16 +245,16 @@ class StageObserver implements WorkflowInterceptor {
             }
         }
         catch( Exception e ) {
-            log.error "Stage ${name} archive/restore failed, falling back to normal execution: ${e.message}", e
+            log.error "Stage ${name} archive/reuse failed, falling back to normal execution: ${e.message}", e
             forwardOutputs(realOutput, placeholders, outputNames, outputIsValue)
             feedClones(clonedChannels, collected)
         }
     }
 
-    private void restoreFromArchive(String name, Map cached,
-                                   Map<String, DataflowWriteChannel> placeholders,
-                                   List<ClonedChannel> clonedChannels) {
-        log.info "Restoring stage ${name} from archive"
+    private void reuseFromArchive(String name, Map cached,
+                                 Map<String, DataflowWriteChannel> placeholders,
+                                 List<ClonedChannel> clonedChannels) {
+        log.info "Reusing archived stage ${name}"
         emitArchivedData(cached, placeholders)
         for( final cc : clonedChannels ) {
             cc.clone.bind(Channel.STOP)
@@ -241,11 +269,18 @@ class StageObserver implements WorkflowInterceptor {
                                   Map<String, Boolean> outputIsValue,
                                   List<ClonedChannel> clonedChannels,
                                   Map<Integer, List<Object>> collected) {
-        log.info "Executing stage ${name} (no archive found)"
-        // single subscription: forward to placeholder AND collect for archiving
-        forwardAndCollectOutputs(realOutput, placeholders, outputNames, outputIsValue, name, digest)
-        feedClones(clonedChannels, collected)
-        archivedStages0.put(name, digest)
+        if( writable ) {
+            log.info "Executing stage ${name} (no archive found)"
+            // single subscription: forward to placeholder AND collect for archiving
+            forwardAndCollectOutputs(realOutput, placeholders, outputNames, outputIsValue, name, digest)
+            feedClones(clonedChannels, collected)
+            archivedStages0.put(name, digest)
+        }
+        else {
+            log.info "Executing stage ${name} (no archive found, read-only mode: skip archiving)"
+            forwardOutputs(realOutput, placeholders, outputNames, outputIsValue)
+            feedClones(clonedChannels, collected)
+        }
     }
 
     private void feedClones(List<ClonedChannel> clonedChannels, Map<Integer, List<Object>> collected) {

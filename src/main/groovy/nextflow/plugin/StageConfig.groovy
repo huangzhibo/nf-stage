@@ -10,7 +10,7 @@ import nextflow.script.dsl.Description
  * Configuration scope for the nf-stage plugin.
  */
 @ScopeName("stage")
-@Description("The `stage` scope controls stage-level archiving and resume.")
+@Description("The `stage` scope controls stage-level archiving and reuse.")
 @CompileStatic
 class StageConfig implements ConfigScope {
 
@@ -22,11 +22,16 @@ class StageConfig implements ConfigScope {
     @Description("File path for cached stages TSV (default: `cached-stages.tsv`).")
     final String cachedStagesFile
 
+    @ConfigOption
+    @Description("Whether this run may write new archives (default: `true`). Set `false` for read-only reuse of a shared archive.")
+    final Boolean writable
+
     /* required by extension point */
     StageConfig() {}
 
     StageConfig(Map opts) {
         this.archiveRoot = opts.archiveRoot as String
         this.cachedStagesFile = opts.cachedStagesFile as String
+        this.writable = opts.writable as Boolean
     }
 }
