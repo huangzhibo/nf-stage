@@ -1,6 +1,8 @@
-# startStage — 从指定阶段开始执行
+# startStage — 从指定阶段开始执行（提案）
 
-状态：设计草案，待后续需要时实现
+[English](../start-stage.md) | **中文**
+
+状态：设计草案，待后续需要时实现。插件层面的统一能力，区别于 README 三类场景表中"手动跳过前序阶段"（流程作者在 entry workflow 中按参数分支）的做法。
 
 ## 1. 场景
 
@@ -37,15 +39,7 @@ stage {
 
 关键点：更上游阶段的归档文件不需要同步。stage.json 中 file 类型元素重建的 Path 对象不会被实际访问，因为消费它们的阶段也被跳过了。`file()` 只创建 Path 引用，不检查文件存在性。
 
-## 5. 与现有能力的区别
-
-| 能力 | 匹配方式 | 需要归档文件 | 用途 |
-|------|---------|-------------|------|
-| 自动恢复 | digest 精确匹配 | 所有阶段 | 同环境重复运行 |
-| startStage | 跳过 digest | 仅 startStage 前一个阶段 | 跨集群迁移 |
-| Nextflow `-resume` | task hash 匹配 | — | task 级缓存 |
-
-## 6. 实现要点
+## 5. 实现要点
 
 - 在 `StageConfig` 增加 `startStage` 配置项
 - `intercept()` 中判断当前阶段是否在 startStage 之前：若是，直接从 archiveRoot 下对应的 stage.json 恢复，不执行也不归档

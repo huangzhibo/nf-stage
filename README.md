@@ -1,48 +1,40 @@
 # nf-stage
 
-Nextflow 插件，提供阶段级归档与复用能力。删除 `work/` 目录后，可从归档中恢复已完成的阶段，跳过重复计算。
+**English** | [中文](README.zh-CN.md)
 
-## 前提
+A Nextflow plugin that provides **stage-level archiving and reuse**. After deleting `work/`, completed stages can be restored from the archive so you don't recompute them.
 
-需要定制版 Nextflow（含 WorkflowInterceptor 扩展点），官方版本暂不支持。
+## Requirements
 
-## 快速开始
+Requires a customized Nextflow build that exposes the `WorkflowInterceptor` extension point; the official distribution does not support this yet.
 
-### 1. 构建
+## Quick Start
+
+### Build
 
 ```bash
-# 定制版 Nextflow
+# Customized Nextflow
 cd nextflow && make assemble
-# 产出: build/releases/nextflow-26.03.1-edge-dist
+# Output: build/releases/nextflow-26.03.1-edge-dist
 
-# nf-stage 插件
+# nf-stage plugin
 cd nf-stage && ./gradlew assemble
-# 产出: build/distributions/nf-stage-0.1.0.zip
+# Output: build/distributions/nf-stage-0.1.0.zip
 ```
 
-### 2. 部署到 HPC
+### Deploy
 
 ```bash
-# 选一个共享目录作为安装根目录
 INSTALL_DIR=/shared/nextflow-stage
 
-# Java 21
-curl -LO https://corretto.aws/downloads/latest/amazon-corretto-21-x64-linux-jdk.tar.gz
-tar xzf amazon-corretto-21-x64-linux-jdk.tar.gz -C $INSTALL_DIR/
-
-# Nextflow 可执行文件
+# Nextflow + plugin
 cp build/releases/nextflow-26.03.1-edge-dist $INSTALL_DIR/nextflow
 chmod +x $INSTALL_DIR/nextflow
-
-# 插件
 mkdir -p $INSTALL_DIR/plugins/nf-stage-0.1.0
-cd $INSTALL_DIR/plugins/nf-stage-0.1.0
-unzip /path/to/nf-stage-0.1.0.zip
+unzip /path/to/nf-stage-0.1.0.zip -d $INSTALL_DIR/plugins/nf-stage-0.1.0/
 ```
 
-### 3. Wrapper 脚本
-
-创建 `$INSTALL_DIR/nextflow-stage`，任何账号都可直接调用：
+Wrapper script (so end users can invoke it directly):
 
 ```bash
 #!/bin/bash
@@ -52,17 +44,7 @@ export NXF_PLUGINS_DIR="$BASEDIR/plugins"
 exec "$BASEDIR/nextflow" "$@"
 ```
 
-```bash
-chmod +x $INSTALL_DIR/nextflow-stage
-```
-
-使用方式与官方 Nextflow 完全一致：
-
-```bash
-/shared/nextflow-stage/nextflow-stage run main.nf
-```
-
-## 配置
+## Configuration
 
 `nextflow.config`:
 
@@ -72,45 +54,89 @@ plugins {
 }
 
 stage {
-    archiveRoot = '.nf-stage-archive'     // 归档目录，默认值
-    cachedStagesFile = 'cached-stages.tsv' // 缓存记录文件，默认值
+    archiveRoot      = '.nf-stage-archive'   // archive root
+    cachedStagesFile = 'cached-stages.tsv'   // reuse record file
+    writable         = true                  // whether this run may write new archives
 }
 ```
 
-`archiveRoot` 应设为计算节点间共享的路径（NFS/Lustre），以便归档文件在恢复时可访问。
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `archiveRoot` | String | `.nf-stage-archive` | Archive root; point at shared storage (NFS/Lustre/S3) for cross-host reuse |
+| `cachedStagesFile` | String | `cached-stages.tsv` | Per-run record of which stages were reused |
+| `writable` | Boolean | `true` | Whether this run may write new archives; set `false` for read-only reuse (see [design.md § Single Writer, Many Readers](docs/design.md#single-writer-many-readers)) |
 
-## 工作原理
+## Writing Reusable Pipelines
 
-1. **首次运行**：拦截每个 named workflow，计算输入摘要（SHA256），正常执行并将输出归档到 `archiveRoot/<stage>/<digest>/`
-2. **后续运行**：相同输入摘要命中归档时，直接从归档恢复输出，跳过该阶段的所有 process
-3. **归档失败**：自动 fallback 到正常执行，不影响流程运行
+nf-stage treats a named workflow as the sole stage boundary:
 
-## 产出文件
+- Declare inputs with `take:` and outputs with `emit:`
+- Files/values in `emit:` are the stage's long-lived archived outputs
+- Intermediate files inside a stage that are not in `emit:` are transient and may be removed together with `work/`
+- Stage inputs should come from an upstream stage's `emit:` or a stable external input (`params`, a static samplesheet). **Do not** depend on the output of a bare process that lives outside any stage — bare processes are not archived, so reusing a downstream stage will re-execute them
 
-- `<archiveRoot>/<stage>/<digest>/stage.json`：归档元数据
-- `cached-stages.tsv`：本次运行中从归档恢复的阶段记录，供平台读取
+Minimal example:
 
-`cached-stages.tsv` 格式：
+```nextflow
+include { PREPARE } from './workflows/prepare'
+include { ALIGN }   from './workflows/align'
+include { CALL }    from './workflows/call'
+
+workflow {
+    main:
+    prepared = PREPARE(params.input)
+    aligned  = ALIGN(prepared.fastq_ch, params.reference)
+    called   = CALL(aligned.bam_ch, params.reference)
+
+    publish:
+    variants = called.vcf_ch
+}
+
+output {
+    variants { path '.' }
+}
+```
+
+A complete example lives under [examples/wgs-demo](examples/wgs-demo).
+
+## How It Works
+
+Every named workflow call is intercepted; the plugin computes a SHA-256 digest over the inputs. On a hit, archived outputs are emitted directly; on a miss, the stage executes normally and the result is archived. See [design.md § Reuse Decision Flow](docs/design.md#reuse-decision-flow).
+
+Three scenarios:
+
+| Scenario | Mechanism | Prerequisite |
+|----------|-----------|--------------|
+| Retry a failed run | Nextflow `-resume` | `work/` still present |
+| Rerun after deleting `work/` | nf-stage stage reuse | archive still present |
+| Skip upstream stages manually | Pipeline author branches in the entry workflow | User supplies input for the starting stage |
+
+## Outputs
+
+Archive layout:
+
+```text
+<archiveRoot>/<stage>/<digest-prefix-16>/
+├── stage.json      # metadata + serialized channel data
+├── 0/              # files for emission 0
+└── 1/              # emission 1 ...
+```
+
+`cached-stages.tsv`:
 
 ```
-stage	digest	task_count	archive_path	archived_at
-ALIGN	sha256:abc123...	5	.nf-stage-archive/ALIGN/sha256:abc123...	2025-04-09T10:00:00
+stage   digest              task_count  archive_path                                archived_at
+ALIGN   sha256:db6fe4b...   4           .nf-stage-archive/ALIGN/db6fe4bca85f1cf2    2026-04-10T14:06:13+08:00
 ```
 
-## 文档
+## More
 
-- [流程开发规范](docs/pipeline-guide.md) — 面向流程开发者
-- [平台接入规范](docs/platform-guide.md) — 面向平台开发者
-- [目标架构](docs/design/architecture.md) — 内部架构决策记录
+- [docs/design.md](docs/design.md) — design document (terms, schema, compatibility digest, single-writer/many-readers, proposals)
 
-## 示例
-
-参见 [examples/wgs-demo](examples/wgs-demo)。
-
-## 开发
+## Development
 
 ```bash
-make assemble  # 构建
-make test      # 运行单元测试
-make install   # 安装到本地 ~/.nextflow/plugins/
+make assemble    # build
+make test        # unit tests
+make install     # install to ~/.nextflow/plugins/
 ```
